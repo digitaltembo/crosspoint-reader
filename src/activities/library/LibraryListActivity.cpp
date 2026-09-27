@@ -5,6 +5,7 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <LibraryBuilder.h>
+#include <LibrarySearch.h>
 #include <LibraryText.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -597,9 +598,8 @@ void LibraryListActivity::restoreExpandedList() {
   requestUpdate();
 }
 
-// One pass over the sort order, keeping what matches. No index, no cache: at the
-// 4096-book format cap this is 4096 comparisons of at most 96 bytes. The result
-// array is allocated once with the exact upper bound and fails back to an
+// One pass over the sort order, keeping what matches (library::filterRows). The
+// result array is allocated once with the exact upper bound and fails back to an
 // explicit message rather than letting vector growth abort the firmware.
 void LibraryListActivity::applyFilter() {
   groupsCollapsed = false;
@@ -612,7 +612,6 @@ void LibraryListActivity::applyFilter() {
   headerSearchTitle = query.empty() ? std::string() : "“" + query + "”";
   if (query.empty()) return;
 
-  const std::string needle = library::fold(query);
   const int total = static_cast<int>(index.bookCount());
   if (total <= 0) return;
 
@@ -623,31 +622,8 @@ void LibraryListActivity::applyFilter() {
     return;
   }
 
-  uint16_t matchCount = 0;
-  std::string author;
-  std::string title;
-  author.reserve(128);
-  title.reserve(2 * 256);
-  for (int row = 0; row < total; row++) {
-    const uint16_t ordinal = index.ordinalForRow(sortOrder, static_cast<uint16_t>(row));
-    library::ClixRecord record{};
-    if (ordinal == 0xFFFF || !index.readRecord(ordinal, record)) continue;
-    if (library::matchesQuery(std::string_view(record.fold, record.foldLen), needle)) {
-      matches[matchCount++] = static_cast<uint16_t>(row);
-      continue;
-    }
-    // The stored fold is the title SORT ("Hobbit, The"), so the shown title and
-    // the author are read and folded here. The author is the search most worth
-    // having: the reader who knows the author usually also knows where the book
-    // is, while "emily" finding Alice Hunter is the case the shelf exists to answer.
-    if (!index.readAuthorAndTitle(record, author, title)) continue;
-    if ((!title.empty() && library::matchesQuery(library::fold(title), needle)) ||
-        (!author.empty() && library::matchesQuery(library::fold(author), needle))) {
-      matches[matchCount++] = static_cast<uint16_t>(row);
-    }
-  }
+  filteredCount = library::filterRows(index, sortOrder, query, matches.get());
   filtered = std::move(matches);
-  filteredCount = matchCount;
 }
 
 // Staged back-out, shared by the Back button and the header's back arrow:

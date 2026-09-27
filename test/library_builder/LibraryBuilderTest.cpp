@@ -10,6 +10,7 @@
 #include "Epub.h"
 #include "LibraryBuilder.h"
 #include "LibraryIndexFile.h"
+#include "LibrarySearch.h"
 
 using namespace library;
 
@@ -484,6 +485,38 @@ TEST_F(LibraryBuilderTest, ReusedRecordsKeepSortKeysWithoutParsing) {
   EXPECT_EQ(title, "The Hobbit");
   EXPECT_EQ(sourceAuthor, "Lu Xun");
   EXPECT_EQ(authorSort, "Lu, Xun");
+}
+
+TEST_F(LibraryBuilderTest, SearchMatchesTitleSortShownTitleAndAuthorInDisplayOrder) {
+  fake::add("/c.epub");
+  bookMetadata["/a.epub"].title = "The Hobbit";
+  bookMetadata["/a.epub"].titleSort = "Hobbit, The";
+  bookMetadata["/a.epub"].author = "J. R. R. Tolkien";
+  bookMetadata["/b.epub"].title = "Middlemarch";
+  bookMetadata["/b.epub"].author = "George Eliot";
+  bookMetadata["/c.epub"].title = "The Silmarillion";
+  bookMetadata["/c.epub"].author = "J. R. R. Tolkien";
+  initial();
+
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  uint16_t rows[3] = {};
+  const auto paths = [&](const SortOrder order, const uint16_t count) {
+    std::vector<std::string> out;
+    for (uint16_t i = 0; i < count; i++) out.push_back(pathAt(index, order, rows[i]));
+    return out;
+  };
+
+  // Stored fold ("hobbit the") and shown title ("the hobbit") both reach it.
+  EXPECT_EQ(paths(SortOrder::TitleAsc, filterRows(index, SortOrder::TitleAsc, "hob", rows)),
+            std::vector<std::string>{"/a.epub"});
+  EXPECT_EQ(paths(SortOrder::TitleAsc, filterRows(index, SortOrder::TitleAsc, "The Hob", rows)),
+            std::vector<std::string>{"/a.epub"});
+  // Author match, returned in the order's display order.
+  EXPECT_EQ(paths(SortOrder::TitleAsc, filterRows(index, SortOrder::TitleAsc, "tolkien", rows)),
+            (std::vector<std::string>{"/a.epub", "/c.epub"}));
+  EXPECT_EQ(filterRows(index, SortOrder::AuthorAsc, "zqxj", rows), 0);
+  EXPECT_EQ(filterRows(index, SortOrder::RecentDesc, "", rows), 3);
 }
 
 TEST_F(LibraryBuilderTest, BlobFieldsLongerThanTheFirstReadChunkAreReadWhole) {

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Benchmark the library index build in the simulator, before and after a change.
+Benchmark the library index build and search in the simulator, before and
+after a change.
 
 Builds the headless benchmark (env:simulator_bench, src/bench/LibraryBench.cpp)
 for the working tree and, optionally, for a baseline commit checked out into a
@@ -11,9 +12,11 @@ Scenarios:
   cold     no /.crosspoint at all: full walk, every EPUB's metadata parsed
   warm     unchanged rebuild after a priming build (the freshness check)
   changed  one book's mtime bumped before each rebuild
+  search   one library search per query and sort order, over a fresh index
 
 Storage-call counts (reads, seeks, bytes) carry over to the device far better
-than host wall time, which only compares CPU work between builds.
+than host wall time, which only compares CPU work between builds. For search,
+the match counts also show whether two builds find the same books.
 
 The book collection is never copied or modified: the simulated SD card under
 .pio/bench/ mirrors it with symlinks, plus one real copy of the book that the
@@ -24,6 +27,7 @@ Requires env:simulator / env:simulator_bench in platformio.local.ini.
 Usage:
   scripts/library_bench.py --library ~/Books --baseline 7a2ae218
   scripts/library_bench.py --library ~/Books --scenarios cold --runs 3
+  scripts/library_bench.py --library ~/Books --scenarios search --query dumas --query "the war"
 """
 
 import argparse
@@ -43,9 +47,24 @@ BENCH_DIR = REPO / ".pio" / "bench"
 ENV = "simulator_bench"
 RUNNER = Path("src/bench/LibraryBench.cpp")
 LOCAL_INI = "platformio.local.ini"
-SCENARIOS = ("cold", "warm", "changed")
+BUILD_SCENARIOS = ("cold", "warm", "changed")
+SCENARIOS = BUILD_SCENARIOS + ("search",)
+SORT_ORDERS = ("title", "author", "recent")
 PHASE_RE = re.compile(r"\[LIBIDX\] phase ([^:]+): (\d+)ms")
 BUILD_START_PHASE = "prepare/prior"
+
+# Search cases that fit any library, as typed on the device keyboard: one letter
+# (most rows match on the stored fold), a leading article, short prefixes, two
+# words, and a miss (every row falls through to the blob read).
+DEFAULT_QUERIES = ("a", "the", "lo", "war", "mar", "the ki", "zqxj")
+
+# Columns of the search table: (label, value getter).
+SEARCH_METRICS = [
+    ("reads", lambda r: r["io"]["reads"]),
+    ("KiB read", lambda r: r["io"]["bytesRead"] / 1024),
+    ("seeks", lambda r: r["io"]["seeks"]),
+    ("cpu ms", lambda r: r["cpuMs"]),
+]
 
 # Columns of the comparison table: (label, value getter).
 METRICS = [
@@ -168,23 +187,38 @@ def pick_touch_book(library):
     fail(f"no .epub found under {library}")
 
 
-def run_scenario(program, sd_root, scenario, runs, touch_rel, read_metadata):
-    command = [str(program), "--runs", str(runs), "--prep", scenario]
-    if scenario == "changed":
-        command += ["--touch", f"/books/{touch_rel.as_posix()}"]
-    if not read_metadata:
-        command.append("--no-metadata")
+def run_program(program, sd_root, arguments):
+    """Run the benchmark binary; returns (BENCH records, stderr)."""
     env = dict(os.environ, CROSSPOINT_SIM_SD=str(sd_root))
-    result = subprocess.run(native(command), env=env, capture_output=True, text=True)
+    result = subprocess.run(native([str(program), *arguments]), env=env, capture_output=True, text=True)
     if result.returncode != 0:
         sys.stderr.write(result.stderr[-4000:])
-        fail(f"{program} --prep {scenario} exited with {result.returncode}")
-
+        fail(f"{program} {' '.join(arguments[:4])} ... exited with {result.returncode}")
     records = [json.loads(line[len("BENCH "):]) for line in result.stdout.splitlines() if line.startswith("BENCH ")]
+    return records, result.stderr
+
+
+def run_search(program, sd_root, runs, queries, orders, read_metadata):
+    arguments = ["--mode", "search", "--runs", str(runs), "--orders", ",".join(orders)]
+    for query in queries:
+        arguments += ["--query", query]
+    if not read_metadata:
+        arguments.append("--no-metadata")
+    records, _ = run_program(program, sd_root, arguments)
+    return records
+
+
+def run_scenario(program, sd_root, scenario, runs, touch_rel, read_metadata):
+    arguments = ["--mode", "build", "--runs", str(runs), "--prep", scenario]
+    if scenario == "changed":
+        arguments += ["--touch", f"/books/{touch_rel.as_posix()}"]
+    if not read_metadata:
+        arguments.append("--no-metadata")
+    records, stderr = run_program(program, sd_root, arguments)
 
     # Group the builder's phase timings per build; each build logs prepare/prior first.
     builds = []
-    for name, ms in PHASE_RE.findall(result.stderr):
+    for name, ms in PHASE_RE.findall(stderr):
         if name == BUILD_START_PHASE or not builds:
             builds.append({})
         builds[-1][name] = int(ms)
@@ -206,8 +240,54 @@ def format_value(value):
     return f"{value:,.1f}" if isinstance(value, float) and not value.is_integer() else f"{value:,.0f}"
 
 
+def delta(values):
+    if len(values) != 2 or values[0] in (None, 0) or values[1] is None:
+        return ""
+    return f"{(values[1] - values[0]) / values[0] * 100:+.0f}%"
+
+
+def print_search_comparison(results, variants, queries, orders):
+    records = [r for r in results if r["scenario"] == "search"]
+    if not records:
+        return
+    both = len(variants) == 2
+    # Per metric: one value per variant, plus the change when comparing two.
+    per_metric = len(variants) + (1 if both else 0)
+    for order in orders:
+        runs = len([r for r in records if r["order"] == order and r["variant"] == variants[-1]]) // max(len(queries), 1)
+        print(f"\n== search, {order} order (median of {runs} runs per query; " + " / ".join(variants) + ")")
+        header = f"{'query':<12}{'matches':>14}"
+        for label, _ in SEARCH_METRICS:
+            header += f"{label:>{11 * per_metric}}"
+        print(header)
+
+        totals = {label: [0.0] * len(variants) for label, _ in SEARCH_METRICS}
+        for query in queries:
+            rows = {v: [r for r in records if r["variant"] == v and r["order"] == order and r["query"] == query]
+                    for v in variants}
+            matches = [median(rows[v], lambda r: r["matches"]) for v in variants]
+            line = f"{query!r:<12}{' / '.join(format_value(m) for m in matches):>14}"
+            for label, getter in SEARCH_METRICS:
+                values = [median(rows[v], getter) for v in variants]
+                for i, value in enumerate(values):
+                    totals[label][i] += value or 0
+                line += "".join(f"{format_value(v):>11}" for v in values)
+                if both:
+                    line += f"{delta(values):>11}"
+            print(line)
+
+        line = f"{'total':<12}{'':>14}"
+        for label, _ in SEARCH_METRICS:
+            values = totals[label]
+            line += "".join(f"{format_value(v):>11}" for v in values)
+            if both:
+                line += f"{delta(values):>11}"
+        print(line)
+
+
 def print_comparison(results, variants):
-    for scenario in sorted({r["scenario"] for r in results}, key=SCENARIOS.index):
+    build_scenarios = [s for s in BUILD_SCENARIOS if any(r["scenario"] == s for r in results)]
+    for scenario in build_scenarios:
         rows = {v: [r for r in results if r["variant"] == v and r["scenario"] == scenario] for v in variants}
         counts = ", ".join(f"{v}: {len(rows[v])} runs, {rows[v][0]['books']} books" for v in variants if rows[v])
         print(f"\n== {scenario} ({counts})")
@@ -236,9 +316,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--library", required=True, type=Path, help="directory of books (read, never modified)")
     parser.add_argument("--baseline", help="git ref to compare against the working tree")
-    parser.add_argument("--runs", type=int, default=5, help="timed runs per scenario (default 5)")
+    parser.add_argument("--runs", type=int, default=5,
+                        help="timed runs per build scenario, or per query and order for search (default 5)")
     parser.add_argument("--scenarios", default=",".join(SCENARIOS), help="comma-separated subset of: " + ", ".join(SCENARIOS))
     parser.add_argument("--touch", type=Path, help="book (relative to --library) for the changed scenario")
+    parser.add_argument("--query", action="append",
+                        help="search query for the search scenario; repeatable (default: a built-in mix)")
+    parser.add_argument("--orders", default=",".join(SORT_ORDERS),
+                        help="sort orders for the search scenario: " + ", ".join(SORT_ORDERS))
     parser.add_argument("--no-metadata", action="store_true", help="filename-only builds")
     parser.add_argument("--skip-build", action="store_true", help="reuse existing benchmark binaries")
     args = parser.parse_args()
@@ -250,6 +335,11 @@ def main():
     for scenario in scenarios:
         if scenario not in SCENARIOS:
             fail(f"unknown scenario {scenario}")
+    queries = args.query or list(DEFAULT_QUERIES)
+    orders = [o.strip() for o in args.orders.split(",") if o.strip()]
+    for order in orders:
+        if order not in SORT_ORDERS:
+            fail(f"unknown sort order {order}")
     if not (REPO / LOCAL_INI).exists():
         fail(f"{LOCAL_INI} with env:simulator_bench is required")
 
@@ -276,7 +366,11 @@ def main():
             print(f"running {variant} / {scenario} ...", file=sys.stderr)
             sd_root = BENCH_DIR / "sd" / variant
             make_sd_root(sd_root, library, touch_rel)
-            for record in run_scenario(program, sd_root, scenario, args.runs, touch_rel, not args.no_metadata):
+            if scenario == "search":
+                records = run_search(program, sd_root, args.runs, queries, orders, not args.no_metadata)
+            else:
+                records = run_scenario(program, sd_root, scenario, args.runs, touch_rel, not args.no_metadata)
+            for record in records:
                 record.update(variant=variant, scenario=scenario)
                 results.append(record)
 
@@ -290,6 +384,8 @@ def main():
         "runs": args.runs,
         "metadata": not args.no_metadata,
         "touch": touch_rel.as_posix(),
+        "queries": queries if "search" in scenarios else None,
+        "orders": orders if "search" in scenarios else None,
     }
     with out.open("w") as f:
         f.write(json.dumps({"meta": meta}) + "\n")
@@ -297,6 +393,7 @@ def main():
             f.write(json.dumps(record) + "\n")
 
     print_comparison(results, list(programs))
+    print_search_comparison(results, list(programs), queries, orders)
     print(f"\nraw results: {out.relative_to(REPO)}")
 
 
