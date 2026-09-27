@@ -9,7 +9,7 @@ meta:
 
 seq:
   - id: version
-    contents: [10]
+    contents: [11]
   - id: lut_offset
     type: u4
     doc: Offset to lookup tables
@@ -65,6 +65,21 @@ types:
       - id: text_reference_href
         type: u4_prefixed_string
         doc: Path to guided first text reference
+      - id: title_sort
+        type: u4_prefixed_string
+        doc: Title file-as, empty if absent
+      - id: author_sort
+        type: u4_prefixed_string
+        doc: Primary author file-as, empty if absent
+      - id: series
+        type: u4_prefixed_string
+        doc: Series name, empty if absent
+      - id: series_index
+        type: u4_prefixed_string
+        doc: Position in series, empty if absent
+      - id: tags
+        type: u4_prefixed_string
+        doc: Newline-separated tags
 
   spine_entry:
     seq:
