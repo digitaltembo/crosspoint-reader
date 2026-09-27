@@ -435,8 +435,10 @@ Written by `lib/LibraryIndex/LibraryBuilder.cpp`, read by `LibraryIndexFile`. On
 file describing every book on the card, so the shelf can sort and search
 thousands of titles without opening any of them.
 
-Format version 2. An index written by another version fails validation on open
-and is rebuilt; that is the entire migration mechanism.
+Format version 3. An index written by another version fails validation on open
+and is rebuilt; that is the entire migration mechanism. Version 2 stored the
+same folders, records and name blob, so a rebuild still reads its books to keep
+their arrival history and metadata.
 
 ### Layout
 
@@ -445,20 +447,56 @@ and is rebuilt; that is the entire migration mechanism.
 | Header | 0 | 64 bytes, `ClixHeader` |
 | Folders | `folderStart` | length-prefixed paths, one per folder |
 | Records | `recordStart` | `bookCount` × 128-byte `ClixRecord` |
-| Permutations | `permStart` | `bookCount` u16 author order, then `bookCount` u16 arrival order |
+| Lists | `listStart` | `listCount` × 16-byte `ClixListDesc`, then u16 list entries and labels (see below) |
 | Name blob | `nameStart` | per record: path hash, name, canonical author, title, source author, author sort (see below) |
 
-The arrival permutation runs oldest first, keyed by the record's FAT
+The Recent list runs oldest first, keyed by the record's FAT
 modification time (when the file landed on the card); `firstSeen` — the
 build-assigned discovery counter — breaks ties and carries books whose
 filesystem reports no time. Fold version 3 introduced the timestamp key; a
 fold bump rebuilds ranks while preserving `firstSeen`.
 Fold version 4 preserves leading articles in title sort and search keys.
 Fold version 5 folds the book's title sort (`file-as`) into `fold`, orders the
-author permutation by the author's `file-as`, and appends the author-sort field
-to the name blob.
+Author list by the author's `file-as`, and appends the author-sort field to the
+name blob.
 
 Sections are 512-byte aligned so each starts on an SD block boundary.
+
+### Lists
+
+The list section starts with a table of `header.listCount` descriptors. Offsets
+are relative to `listStart`, so entries and labels may sit anywhere in the
+section:
+
+```text
+[u8 kind]        0 identity, 1 books, 2 groups
+[u8 role]        0 external, 1 recent, 2 title, 3 author
+[u8 flags]       bit 0: top-level (shown as a tab or in the list picker)
+[u8 labelLen]
+[u16 entryCount] rows; bookCount for an identity list
+[u16 reserved]
+[u32 entriesOff] u16[entryCount]; unused by an identity list
+[u32 labelOff]   UTF-8, labelLen bytes
+```
+
+- **Identity** lists every record in record (title) order and stores no
+  entries.
+- **Books** entries are record ordinals. A books list may name any subset of the
+  library, in any order.
+- **Groups** entries are ids of other lists, each of which opens as its own row.
+  An entry is valid only when it names a *later* list, so nesting can be any
+  depth and can never form a cycle.
+
+Lists 0, 1 and 2 are always Recent (books, every record), Title (identity) and
+Author (books, every record), all top-level. They carry no label; the firmware
+names them. The builder writes only these three, with their entries directly
+after the table.
+
+Later lists are written by external tools and have role `external`. The reader
+validates the three built-in descriptors on open. It checks each external
+descriptor's bounds when that list is read, and each entry's value as it is read.
+The library screen shows up to four top-level lists as tabs; with more, one tab
+opens a picker of all of them.
 
 ### Records are exactly 128 bytes
 
@@ -523,6 +561,19 @@ unreadable entry was seen, the staging files are discarded and the live index is
 left byte-for-byte unchanged. A normal rebuild action is therefore a freshness
 check, not a forced metadata reread.
 
+A rebuild that does replace the index carries external lists over. Each previous
+record is matched to its new ordinal: by path during the walk, and by size for a
+rename. Every external list is then rewritten against the new ordinals:
+
+- Order is kept.
+- Books that are gone are dropped.
+- A groups entry whose child list ended up empty is dropped from its parent.
+- A malformed list is written back empty.
+
+Books added since the tool last ran are not in any external list. The mapping
+costs two bytes per book and per list, and is allocated only when there are
+lists to carry.
+
 ### Header flags
 
 `RANKS_DEGRADED` says one or more orders fell back to walk order because a
@@ -537,6 +588,11 @@ buffer, or that its fallible 8 KiB allocation failed. The walk still indexes
 every enumerated book; it only stops remembering additional identities for
 duplicate-dirent detection, so a damaged FAT may expose duplicates but cannot
 make a real book disappear.
+
+`LISTS_DROPPED` says the previous index held external lists that this build
+could not carry over, because the mapping could not be allocated or the previous
+lists could not be read. The build itself still succeeds, with only the built-in
+lists.
 
 `selfSize` is the expected file size. Comparing it against the real one is a free
 truncation guard: a build cut short by a power failure cannot pass.

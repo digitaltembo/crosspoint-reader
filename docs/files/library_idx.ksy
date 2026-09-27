@@ -23,12 +23,14 @@ instances:
     type: record_section
     doc: List of entries in the library. Each entry is exactly 128 bytes.
     
-  permutations:
-    pos: _root.header.perm_start
-    size: _root.header.book_count * 4 # 2 fields * 2 bytes * book_count
-    type: permutation_section
-    doc: Two separate permutations of the indices in the records list.
-    
+  lists:
+    pos: _root.header.list_start
+    size: _root.header.list_len
+    type: list_section
+    doc: >
+      Table of list descriptors, then their entries and labels. Lists 0..2 are
+      Recent, Title and Author; later lists come from external tools.
+
   name_section:
     pos: _root.header.name_start
     size: _root.header.name_len
@@ -41,7 +43,7 @@ types:
       - id: magic
         contents: "CLX1" 
       - id: format_version
-        contents: [2]
+        contents: [3]
       - id: fold_version
         contents: [5]
       - id: flags
@@ -66,16 +68,23 @@ types:
       - id: record_start
         type: u4
         doc: Offset into file at which the ClixRecords start.
-      - id: perm_start
+      - id: list_start
         type: u4
+        doc: Offset into file at which the list section starts.
       - id: name_start
         type: u4
       - id: name_len
         type: u4
       - id: self_size
         type: u4
+      - id: list_len
+        type: u4
+        doc: Total size of the list section.
+      - id: list_count
+        type: u2
+        doc: Descriptors in the list table; at least 3.
       - id: reserved
-        size: 20
+        size: 14
 
     types:
       clix_flags:
@@ -86,8 +95,11 @@ types:
             type: b1
           - id: dedup_degraded
             type: b1
+          - id: lists_dropped
+            type: b1
+            doc: External lists from the previous index could not be carried over.
           - id: reserved
-            type: b6
+            type: b5
 
   folder_section:
     seq:
@@ -195,18 +207,67 @@ types:
             size: author_sort_len
             encoding: UTF-8
 
-  permutation_section:
+  list_section:
     seq:
-      - id: author_order
+      - id: lists
+        type: list_desc
+        repeat: expr
+        repeat-expr: _root.header.list_count
+
+  list_desc:
+    seq:
+      - id: kind
+        type: u1
+        enum: list_kind
+      - id: role
+        type: u1
+        enum: list_role
+        doc: Built-in lists carry no label and are named by the firmware.
+      - id: flags
+        type: list_flags
+      - id: label_len
+        type: u1
+      - id: entry_count
+        type: u2
+        doc: Rows in the list; book_count for an identity list.
+      - id: reserved
+        type: u2
+      - id: entries_off
+        type: u4
+        doc: From list_start. Unused by an identity list.
+      - id: label_off
+        type: u4
+        doc: From list_start.
+
+    instances:
+      entries:
+        io: _parent._io
+        pos: entries_off
         type: u2
         repeat: expr
-        repeat-expr: _root.header.book_count
-        doc: List of book indices, permuted to be sorted by the Author
-      - id: arrival_order
-        type: u2
-        repeat: expr
-        repeat-expr: _root.header.book_count
-        doc: List of book indices, permuted to be sorted by the time of arrival
+        repeat-expr: entry_count
+        if: kind != list_kind::identity
+        doc: >
+          Record ordinals for a books list; ids of LATER lists for a groups
+          list, which is what keeps nesting free of cycles.
+      label:
+        io: _parent._io
+        pos: label_off
+        type: str
+        size: label_len
+        encoding: UTF-8
+        if: label_len > 0
+
+    types:
+      list_flags:
+        meta:
+          bit-endian: le
+        seq:
+          - id: top_level
+            type: b1
+            doc: Shown as a tab or in the list picker.
+          - id: reserved
+            type: b7
 
   name_section_raw:
     seq:
@@ -218,3 +279,12 @@ enums:
     0: not_attempted
     1: extracted
     2: failed
+  list_kind:
+    0: identity
+    1: books
+    2: groups
+  list_role:
+    0: external
+    1: recent
+    2: title
+    3: author
