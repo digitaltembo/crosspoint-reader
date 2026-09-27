@@ -23,6 +23,10 @@ class CrossPointState : public PersistableStore<CrossPointState> {
   uint8_t readerActivityLoadCount = 0;
   bool lastSleepFromReader = false;
   bool showBootScreen = true;
+  // Library list last chosen from the list picker, and a hash of its label so a
+  // regenerated index that reuses the id for another list is not mistaken for it.
+  uint16_t libraryListId = UINT16_MAX;
+  uint32_t libraryListLabelHash = 0;
 
   static const char* getFilePath() { return "/.crosspoint/state.json"; }
   void toJson(JsonDocument& doc) const;
