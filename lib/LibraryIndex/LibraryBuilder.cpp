@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstring>
 
+#include "LibraryGenerated.h"
 #include "LibraryIndexFile.h"
 #include "LibraryText.h"
 
@@ -24,6 +25,9 @@ constexpr char NEW_PATH[] = "/.crosspoint/library.new";
 constexpr char BACKUP_PATH[] = "/.crosspoint/library.bak";
 constexpr char STAGE_PATH[] = "/.crosspoint/library.stage";
 constexpr char DIRTY_PATH[] = "/.crosspoint/library.dirty";
+// Generated lists, staged between the title sort and the emit.
+constexpr char GEN_META_PATH[] = "/.crosspoint/library.gen";
+constexpr char GEN_ENTRIES_PATH[] = "/.crosspoint/library.gen.e";
 constexpr char CACHE_DIR[] = "/.crosspoint";
 // Sticky fallback when the marker could not be persisted (card unavailable at
 // write time): callers must still see the index as stale until a rebuild clears it.
@@ -622,24 +626,72 @@ uint32_t blobBytesFor(const StagedEntry& entry, const StagedEntry& canonical) {
          entry.tagsLen;
 }
 
+// The staged books and folders, read for the generated lists by title-order
+// ordinal. Field-sized reads, not whole staged entries.
+class StageListSource final : public GeneratedListSource {
+ public:
+  StageListSource(HalFile& stage, HalFile& folders, const uint16_t* order)
+      : stage(stage), folders(folders), order(order) {}
+
+  bool readSeries(const uint16_t ordinal, std::string& name, std::string& index) override {
+    return readText(ordinal, offsetof(StagedEntry, seriesLen), name) &&
+           readText(ordinal, offsetof(StagedEntry, seriesIndexLen), index);
+  }
+  bool readTags(const uint16_t ordinal, std::string& joined) override {
+    return readText(ordinal, offsetof(StagedEntry, tagsLen), joined);
+  }
+  bool readFolderId(const uint16_t ordinal, uint16_t& folderId) override {
+    return readAt(stage, entryAt(ordinal) + offsetof(ClixRecord, folderId), &folderId, sizeof(folderId));
+  }
+  bool readFolders(const uint32_t offset, void* out, const size_t len) override {
+    return readAt(folders, offset, out, len);
+  }
+
+ private:
+  uint64_t entryAt(const uint16_t ordinal) const { return static_cast<uint64_t>(order[ordinal]) * STAGE_STRIDE; }
+  // A length byte and the text right after it, as every staged text field is laid out.
+  bool readText(const uint16_t ordinal, const size_t lenOffset, std::string& out) {
+    uint8_t len = 0;
+    if (!readAt(stage, entryAt(ordinal) + lenOffset, &len, sizeof(len))) return false;
+    out.resize(len);
+    return len == 0 || readAt(stage, entryAt(ordinal) + lenOffset + 1, out.data(), len);
+  }
+  static bool readAt(HalFile& file, const uint64_t offset, void* out, const size_t len) {
+    return file.seekSet(offset) && file.read(out, len) == static_cast<int>(len);
+  }
+
+  HalFile& stage;
+  HalFile& folders;
+  const uint16_t* order;
+};
+
 // External lists read back from the previous index and rewritten against this
-// build's record order. Only allocated when the previous index has any.
+// build's record order and list ids. Generated lists are not carried: they are
+// rebuilt from the books. Only allocated when the previous index has external
+// lists.
 constexpr uint16_t CARRY_CHUNK = 256;  // entries per read: one 512-byte sector
+constexpr uint16_t NO_LIST = 0xFFFF;
 struct ListCarry {
   LibraryIndexFile previous;
   std::unique_ptr<uint16_t[]> newOrdinal;  // previous record ordinal -> this build's, or NO_ORDINAL
-  std::unique_ptr<uint16_t[]> counts;      // surviving entries per list id
+  std::unique_ptr<uint16_t[]> newId;       // previous list id -> this build's, or NO_LIST
+  std::unique_ptr<uint16_t[]> counts;      // surviving entries per previous list id
   std::unique_ptr<uint16_t[]> chunk;
-  uint16_t listCount = CLIX_BUILTIN_LISTS;
-  uint16_t bookCount = 0;  // this build's
+  uint16_t listCount = CLIX_BUILTIN_LISTS;  // the previous index's
+  uint16_t carried = 0;
   uint32_t entryBytes = 0;
   uint32_t labelBytes = 0;
 };
 
-// Surviving entries of external list `id`, in order: Books entries whose book
-// is still here (remapped to this build's ordinal), and Groups entries whose
-// child list kept at least one entry, so an emptied category disappears from
-// its parent. Counted when `out` is null, written otherwise.
+// Whether previous list `child` survives as a child of list `id`: it must be a
+// later, carried list that kept at least one entry, so an emptied category
+// disappears from its parent.
+bool childSurvives(const ListCarry& carry, const uint16_t id, const uint16_t child) {
+  return child > id && child < carry.listCount && carry.newId[child] != NO_LIST && carry.counts[child] > 0;
+}
+
+// Surviving entries of external list `id`, in order, remapped to this build's
+// record ordinals and list ids. Counted when `out` is null, written otherwise.
 bool carryEntries(ListCarry& carry, const uint16_t id, const ClixListDesc& list, serialization::BufferedFileWriter* out,
                   uint16_t& count, uint32_t& serviceUnits) {
   count = 0;
@@ -653,7 +705,9 @@ bool carryEntries(ListCarry& carry, const uint16_t id, const ClixListDesc& list,
           list.kind == CLIX_LIST_GROUPS || (list.kind == CLIX_LIST_MIXED && (entry & CLIX_ENTRY_LIST_BIT) != 0);
       if (isList) {
         const uint16_t child = entry & static_cast<uint16_t>(~CLIX_ENTRY_LIST_BIT);
-        if (child <= id || child >= carry.listCount || carry.counts[child] == 0) continue;
+        if (!childSurvives(carry, id, child)) continue;
+        entry = list.kind == CLIX_LIST_MIXED ? static_cast<uint16_t>(carry.newId[child] | CLIX_ENTRY_LIST_BIT)
+                                             : carry.newId[child];
       } else {
         if (entry >= carry.previous.bookCount() || carry.newOrdinal[entry] == NO_ORDINAL) continue;
         entry = carry.newOrdinal[entry];
@@ -669,18 +723,18 @@ bool carryEntries(ListCarry& carry, const uint16_t id, const ClixListDesc& list,
 // list. Children always have higher ids than their parents, so walking the
 // table backwards knows each child's surviving count before its parent needs it.
 bool prepareListCarry(ListCarry& carry, const uint16_t* order, const uint16_t* priorForStage, const uint16_t n,
-                      const uint16_t priorCount, uint32_t& serviceUnits) {
+                      const uint16_t priorCount, const uint16_t firstId, uint32_t& serviceUnits) {
   if (!carry.previous.openForReconciliation(INDEX_PATH) || carry.previous.bookCount() != priorCount ||
       carry.previous.listCount() <= CLIX_BUILTIN_LISTS) {
     LOG_ERR("LIBIDX", "previous index lists unreadable");
     return false;
   }
   carry.listCount = carry.previous.listCount();
-  carry.bookCount = n;
   carry.newOrdinal = makeUniqueNoThrow<uint16_t[]>(priorCount == 0 ? 1 : priorCount);
+  carry.newId = makeUniqueNoThrow<uint16_t[]>(carry.listCount);
   carry.counts = makeUniqueNoThrow<uint16_t[]>(carry.listCount);
   carry.chunk = makeUniqueNoThrow<uint16_t[]>(CARRY_CHUNK);
-  if (!carry.newOrdinal || !carry.counts || !carry.chunk) {
+  if (!carry.newOrdinal || !carry.newId || !carry.counts || !carry.chunk) {
     LOG_ERR("LIBIDX", "OOM: list carry for %u books, %u lists", static_cast<unsigned>(priorCount),
             static_cast<unsigned>(carry.listCount));
     return false;
@@ -691,11 +745,26 @@ bool prepareListCarry(ListCarry& carry, const uint16_t* order, const uint16_t* p
     const uint16_t p = priorForStage[order[t]];
     if (p < priorCount) carry.newOrdinal[p] = t;
   }
-  for (uint16_t id = carry.listCount; id-- > CLIX_BUILTIN_LISTS;) {
+  // External lists keep their relative order after this build's generated ones.
+  // A malformed list is written back empty; an I/O failure drops them all.
+  for (uint16_t id = 0; id < carry.listCount; id++) {
+    carry.newId[id] = NO_LIST;
     carry.counts[id] = 0;
+    if (id < CLIX_BUILTIN_LISTS) continue;
+    ClixListDesc list{};
+    const bool valid = carry.previous.readList(id, list);
+    if (!valid && carry.previous.ioFailed()) return false;
+    if (valid && list.role != CLIX_ROLE_EXTERNAL) continue;
+    if (static_cast<uint32_t>(firstId) + carry.carried >= CLIX_MAX_LISTS) {
+      LOG_ERR("LIBIDX", "external lists past the %u-list limit", static_cast<unsigned>(CLIX_MAX_LISTS));
+      return false;
+    }
+    carry.newId[id] = static_cast<uint16_t>(firstId + carry.carried++);
+  }
+  for (uint16_t id = carry.listCount; id-- > CLIX_BUILTIN_LISTS;) {
+    if (carry.newId[id] == NO_LIST) continue;
     ClixListDesc list{};
     if (!carry.previous.readList(id, list)) {
-      // A malformed list is written back empty; an I/O failure drops them all.
       if (carry.previous.ioFailed()) return false;
       continue;
     }
@@ -710,18 +779,69 @@ bool prepareListCarry(ListCarry& carry, const uint16_t* order, const uint16_t* p
   return true;
 }
 
-// The list section: table, built-in entries, carried entries, carried labels.
-// Offsets follow the sizes prepareListCarry measured.
-void writeLists(serialization::BufferedFileWriter& out, ListCarry* carry, const uint16_t n,
-                const uint16_t* arrivalOrder, const SortKey* authorSort, bool& ioFailed, uint32_t& serviceUnits) {
-  const uint16_t listCount = carry ? carry->listCount : CLIX_BUILTIN_LISTS;
+// Copy the staged generated lists' descriptors (offsets rebased) or, with
+// `labels`, their labels. The meta file holds each descriptor followed by its
+// label, so both passes walk it the same way.
+bool copyGeneratedMeta(serialization::BufferedFileWriter& out, const GeneratedLists& gen, const bool labels,
+                       const uint32_t entryBase, const uint32_t labelBase, uint32_t& serviceUnits) {
+  HalFile meta;
+  if (!Storage.openFileForRead("LIBIDX", GEN_META_PATH, meta)) return false;
+  std::string label;
+  for (uint16_t i = 0; i < gen.listCount; i++) {
+    serviceBuilder(serviceUnits);
+    ClixListDesc list{};
+    if (meta.read(&list, sizeof(list)) != static_cast<int>(sizeof(list))) return false;
+    label.resize(list.labelLen);
+    if (list.labelLen > 0 && meta.read(label.data(), list.labelLen) != static_cast<int>(list.labelLen)) return false;
+    if (labels) {
+      out.write(label.data(), label.size());
+      continue;
+    }
+    if (list.kind != CLIX_LIST_IDENTITY) list.entriesOff += entryBase;
+    if (list.labelLen > 0) list.labelOff += labelBase;
+    out.write(&list, sizeof(list));
+  }
+  return true;
+}
+
+bool copyGeneratedEntries(serialization::BufferedFileWriter& out, const GeneratedLists& gen, uint32_t& serviceUnits) {
+  HalFile entries;
+  if (!Storage.openFileForRead("LIBIDX", GEN_ENTRIES_PATH, entries)) return false;
+  uint8_t buf[128];
+  uint32_t copied = 0;
+  while (copied < gen.entryBytes) {
+    serviceBuilder(serviceUnits);
+    const size_t want = std::min<uint32_t>(sizeof(buf), gen.entryBytes - copied);
+    if (entries.read(buf, want) != static_cast<int>(want)) return false;
+    out.write(buf, want);
+    copied += static_cast<uint32_t>(want);
+  }
+  return true;
+}
+
+// The list section: table (built-in, generated, carried), then entries and
+// labels in the same order. Offsets follow the sizes already measured.
+void writeLists(serialization::BufferedFileWriter& out, ListCarry* carry, const GeneratedLists& gen,
+                const uint8_t options, const uint16_t n, const uint16_t* arrivalOrder, const SortKey* authorSort,
+                bool& ioFailed, uint32_t& serviceUnits) {
+  const uint16_t carried = carry ? carry->carried : 0;
+  const uint16_t listCount = static_cast<uint16_t>(CLIX_BUILTIN_LISTS + gen.listCount + carried);
   ClixListDesc builtins[CLIX_BUILTIN_LISTS];
-  builtinListDescs(builtins, n, listCount);
+  builtinListDescs(builtins, n, listCount, options);
   out.write(builtins, sizeof(builtins));
 
-  uint32_t entryCursor = listCount * sizeof(ClixListDesc) + builtinListEntryBytes(n);
-  uint32_t labelCursor = entryCursor + (carry ? carry->entryBytes : 0);
-  for (uint16_t id = CLIX_BUILTIN_LISTS; id < listCount && !ioFailed; id++) {
+  const uint32_t genEntryBase = listCount * sizeof(ClixListDesc) + builtinListEntryBytes(n);
+  const uint32_t genLabelBase = genEntryBase + gen.entryBytes + (carry ? carry->entryBytes : 0);
+  if (gen.listCount > 0 && !copyGeneratedMeta(out, gen, false, genEntryBase, genLabelBase, serviceUnits)) {
+    LOG_ERR("LIBIDX", "generated list table unreadable");
+    ioFailed = true;
+    return;
+  }
+
+  uint32_t entryCursor = genEntryBase + gen.entryBytes;
+  uint32_t labelCursor = genLabelBase + gen.labelBytes;
+  for (uint16_t id = CLIX_BUILTIN_LISTS; carry && id < carry->listCount && !ioFailed; id++) {
+    if (carry->newId[id] == NO_LIST) continue;
     ClixListDesc list{};
     if (!carry->previous.readList(id, list)) {
       ioFailed = carry->previous.ioFailed();
@@ -745,9 +865,13 @@ void writeLists(serialization::BufferedFileWriter& out, ListCarry* carry, const 
     const uint16_t ordinal = authorSort ? authorSort[k].ordinal : k;
     out.write(&ordinal, sizeof(ordinal));
   }
-  if (!carry) return;
+  if (!ioFailed && gen.entryBytes > 0 && !copyGeneratedEntries(out, gen, serviceUnits)) {
+    LOG_ERR("LIBIDX", "generated list entries unreadable");
+    ioFailed = true;
+  }
 
-  for (uint16_t id = CLIX_BUILTIN_LISTS; id < listCount && !ioFailed; id++) {
+  for (uint16_t id = CLIX_BUILTIN_LISTS; carry && id < carry->listCount && !ioFailed; id++) {
+    if (carry->newId[id] == NO_LIST) continue;
     ClixListDesc list{};
     if (!carry->previous.readList(id, list) || list.kind == CLIX_LIST_IDENTITY) continue;
     uint16_t written = 0;
@@ -756,8 +880,13 @@ void writeLists(serialization::BufferedFileWriter& out, ListCarry* carry, const 
       ioFailed = true;
     }
   }
+  if (!ioFailed && gen.labelBytes > 0 && !copyGeneratedMeta(out, gen, true, 0, 0, serviceUnits)) {
+    LOG_ERR("LIBIDX", "generated list labels unreadable");
+    ioFailed = true;
+  }
   std::string label;
-  for (uint16_t id = CLIX_BUILTIN_LISTS; id < listCount && !ioFailed; id++) {
+  for (uint16_t id = CLIX_BUILTIN_LISTS; carry && id < carry->listCount && !ioFailed; id++) {
+    if (carry->newId[id] == NO_LIST) continue;
     ClixListDesc list{};
     if (!carry->previous.readList(id, list) || list.labelLen == 0) continue;
     if (!carry->previous.readListLabel(list, label)) {
@@ -766,12 +895,12 @@ void writeLists(serialization::BufferedFileWriter& out, ListCarry* carry, const 
     }
     out.write(label.data(), label.size());
   }
-  if (carry->previous.ioFailed()) ioFailed = true;
+  if (carry && carry->previous.ioFailed()) ioFailed = true;
 }
 
 bool emitIndex(const char* folderStagePath, WalkState& st, const uint16_t* order, const uint16_t* resolvedFirstSeen,
                const uint16_t* priorForStage, const uint16_t priorCount, const bool carryLists,
-               const bool coreSortsAvailable, BuildStats& stats) {
+               const GeneratedLists& gen, const uint8_t options, const bool coreSortsAvailable, BuildStats& stats) {
   const uint16_t n = st.books;
   uint32_t serviceUnits = 0;
 
@@ -791,6 +920,7 @@ bool emitIndex(const char* folderStagePath, WalkState& st, const uint16_t* order
   header.metadataEnabled = st.readMetadata;
   // Placeholder only. Degradations are known after the sorts have run.
   header.flags = 0;
+  header.listOptions = options;
   header.listCount = CLIX_BUILTIN_LISTS;
   // The blob is the LAST section, so its size affects only selfSize — every
   // section offset is already fixed by the counts. Lay out with a placeholder
@@ -1174,23 +1304,26 @@ bool emitIndex(const char* folderStagePath, WalkState& st, const uint16_t* order
   }
 
   // Sized here, after the sorts have released their scratch, because the
-  // carried lists change only the list section's length: records start where
-  // they already did and the name blob moves with the new layout.
+  // generated and carried lists change only the list section's length: records
+  // start where they already did and the name blob moves with the new layout.
+  const uint16_t carriedFirstId = static_cast<uint16_t>(CLIX_BUILTIN_LISTS + gen.listCount);
   std::unique_ptr<ListCarry> carry;
   if (carryLists) {
     carry = makeUniqueNoThrow<ListCarry>();
-    if (!carry || !priorForStage || !prepareListCarry(*carry, order, priorForStage, n, priorCount, serviceUnits)) {
+    if (!carry || !priorForStage ||
+        !prepareListCarry(*carry, order, priorForStage, n, priorCount, carriedFirstId, serviceUnits)) {
       LOG_ERR("LIBIDX", "external lists dropped from the rebuilt index");
       carry.reset();
       stats.listsDropped = true;
+    } else if (carry->carried == 0) {
+      carry.reset();
     }
   }
-  if (carry) {
-    header.listCount = carry->listCount;
-    layoutSections(
-        header, st.folderBytes,
-        carry->listCount * sizeof(ClixListDesc) + builtinListEntryBytes(n) + carry->entryBytes + carry->labelBytes, 0);
-  }
+  header.listCount = static_cast<uint16_t>(carriedFirstId + (carry ? carry->carried : 0));
+  layoutSections(header, st.folderBytes,
+                 header.listCount * sizeof(ClixListDesc) + builtinListEntryBytes(n) + gen.entryBytes + gen.labelBytes +
+                     (carry ? carry->entryBytes + carry->labelBytes : 0),
+                 0);
 
   // Records, in title order, with both ranks and the name offset filled in.
   //
@@ -1234,7 +1367,9 @@ bool emitIndex(const char* folderStagePath, WalkState& st, const uint16_t* order
     put(&entry.record, sizeof(ClixRecord));
   }
   padTo(header.listStart);
-  if (!ioFailed) writeLists(outBuffer, carry.get(), n, arrivalOrder.get(), authorSort.get(), ioFailed, serviceUnits);
+  if (!ioFailed) {
+    writeLists(outBuffer, carry.get(), gen, options, n, arrivalOrder.get(), authorSort.get(), ioFailed, serviceUnits);
+  }
   if (!ioFailed && outBuffer.position() != header.listStart + header.listLen) {
     LOG_ERR("LIBIDX", "list section is %u bytes, expected %u",
             static_cast<unsigned>(outBuffer.position() - header.listStart), static_cast<unsigned>(header.listLen));
@@ -1278,9 +1413,9 @@ bool emitIndex(const char* folderStagePath, WalkState& st, const uint16_t* order
   const uint32_t written = static_cast<uint32_t>(outBuffer.position());
   if (!outBuffer.flush()) ioFailed = true;
 
-  header.flags = (stats.ranksDegraded ? CLIX_FLAG_RANKS_DEGRADED : 0) |
-                 (stats.dedupDegraded ? CLIX_FLAG_DEDUP_DEGRADED : 0) |
-                 (stats.listsDropped ? CLIX_FLAG_LISTS_DROPPED : 0);
+  header.flags =
+      (stats.ranksDegraded ? CLIX_FLAG_RANKS_DEGRADED : 0) | (stats.dedupDegraded ? CLIX_FLAG_DEDUP_DEGRADED : 0) |
+      (stats.listsDropped ? CLIX_FLAG_LISTS_DROPPED : 0) | (stats.listsIncomplete ? CLIX_FLAG_LISTS_INCOMPLETE : 0);
 
   if (!out.seekSet(0)) {
     ioFailed = true;
@@ -1331,14 +1466,18 @@ bool markLibraryIndexDirty() {
 
 bool isLibraryIndexDirty() { return dirtyInMemory || Storage.exists(DIRTY_PATH); }
 
-bool buildLibraryIndex(const char* rootPath, BuildStats& stats, const bool readMetadata) {
+bool buildLibraryIndex(const char* rootPath, BuildStats& stats, const bool readMetadata, uint8_t listOptions) {
   const uint32_t startMs = millis();
   uint32_t serviceUnits = 0;
   stats = BuildStats{};
+  listOptions &= CLIX_OPTIONS_ALL;
+  if (listOptions == 0) listOptions = CLIX_OPTIONS_DEFAULT;  // an index shows at least one list
 
   Storage.mkdir(CACHE_DIR);
   if (!recoverInterruptedInstall()) return false;
   Storage.remove(STAGE_PATH);
+  Storage.remove(GEN_META_PATH);
+  Storage.remove(GEN_ENTRIES_PATH);
   const std::string folderStagePath = std::string(STAGE_PATH) + ".f";
   Storage.remove(folderStagePath.c_str());
 
@@ -1376,7 +1515,15 @@ bool buildLibraryIndex(const char* rootPath, BuildStats& stats, const bool readM
     if (previous.openForReconciliation(INDEX_PATH)) {
       nextFirstSeen = previous.header().nextFirstSeen;
       priorCount = previous.bookCount();
-      carryLists = previous.listCount() > CLIX_BUILTIN_LISTS;
+      // Only external lists are carried; generated ones are rebuilt.
+      for (uint16_t id = CLIX_BUILTIN_LISTS; id < previous.listCount() && !carryLists; id++) {
+        ClixListDesc list{};
+        carryLists = !previous.readList(id, list) || list.role == CLIX_ROLE_EXTERNAL;
+      }
+      if (previous.ioFailed()) {
+        LOG_ERR("LIBIDX", "cannot read previous index lists; rebuild deferred");
+        return false;
+      }
       priorList = makeUniqueNoThrow<PriorEntry[]>(priorCount == 0 ? 1 : priorCount);
       if (!priorList) {
         LOG_ERR("LIBIDX", "prior index array alloc failed");
@@ -1464,9 +1611,11 @@ bool buildLibraryIndex(const char* rootPath, BuildStats& stats, const bool readM
   stats.unchanged = st.reused;
   stats.enriched = st.enriched;
 
-  // A previous-format index reuses its books' metadata but is still rewritten.
-  if (previous.isOpen() && previous.header().formatVersion == CLIX_FORMAT_VERSION && st.books == priorCount &&
-      st.reused == priorCount && stats.metadataReused == priorCount && st.unreadableSkipped == 0) {
+  // A previous-format index reuses its books' metadata but is still rewritten,
+  // as is one built with other list options.
+  if (previous.isOpen() && previous.header().formatVersion == CLIX_FORMAT_VERSION &&
+      previous.header().listOptions == listOptions && st.books == priorCount && st.reused == priorCount &&
+      stats.metadataReused == priorCount && st.unreadableSkipped == 0) {
     previous.close();
     Storage.remove(STAGE_PATH);
     Storage.remove(folderStagePath.c_str());
@@ -1662,12 +1811,43 @@ bool buildLibraryIndex(const char* rootPath, BuildStats& stats, const bool readM
   }
   LOG_DBG("LIBIDX", "phase title order: %ums", static_cast<unsigned>(millis() - titleStartMs));
 
+  // --- generated lists -------------------------------------------------------
+  // Before the emit, whose author sort is the largest allocation: each kind
+  // stages its lists to the card and releases its scratch.
+  [[maybe_unused]] const uint32_t generateStartMs = millis();
+  GeneratedLists gen;
+  if ((listOptions & (CLIX_OPTION_SERIES | CLIX_OPTION_TAGS | CLIX_OPTION_FOLDERS)) != 0) {
+    HalFile stage;
+    HalFile folders;
+    bool generated = Storage.openFileForRead("LIBIDX", STAGE_PATH, stage);
+    // An index with no books has no folder stage content, but the file exists.
+    generated = generated && Storage.openFileForRead("LIBIDX", folderStagePath.c_str(), folders);
+    if (generated) {
+      StageListSource source(stage, folders, order.get());
+      generated = generateLists(source, st.books, st.folderId, listOptions, CLIX_BUILTIN_LISTS,
+                                CLIX_MAX_LISTS - CLIX_BUILTIN_LISTS, GEN_META_PATH, GEN_ENTRIES_PATH, gen);
+    }
+    if (!generated) {
+      LOG_ERR("LIBIDX", "generated lists failed; keeping the previous index");
+      Storage.remove(STAGE_PATH);
+      Storage.remove(folderStagePath.c_str());
+      Storage.remove(GEN_META_PATH);
+      Storage.remove(GEN_ENTRIES_PATH);
+      return false;
+    }
+    stats.listsIncomplete = gen.incomplete;
+  }
+  LOG_DBG("LIBIDX", "phase generated lists: %u lists, %ums", static_cast<unsigned>(gen.listCount),
+          static_cast<unsigned>(millis() - generateStartMs));
+
   [[maybe_unused]] const uint32_t emitStartMs = millis();
   const bool ok = emitIndex(folderStagePath.c_str(), st, order.get(), resolvedFirstSeen.get(), priorForStage.get(),
-                            priorCount, carryLists, coreSortsAvailable, stats);
+                            priorCount, carryLists, gen, listOptions, coreSortsAvailable, stats);
   LOG_DBG("LIBIDX", "phase author/orders/emit: %ums", static_cast<unsigned>(millis() - emitStartMs));
   Storage.remove(STAGE_PATH);
   Storage.remove(folderStagePath.c_str());
+  Storage.remove(GEN_META_PATH);
+  Storage.remove(GEN_ENTRIES_PATH);
 
   stats.walkMs = millis() - startMs;
   stats.indexReplaced = ok;

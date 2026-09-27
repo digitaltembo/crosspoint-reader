@@ -9,6 +9,7 @@
 
 #include "Epub.h"
 #include "LibraryBuilder.h"
+#include "LibraryGenerated.h"
 #include "LibraryIndexFile.h"
 #include "LibrarySearch.h"
 
@@ -839,4 +840,213 @@ TEST_F(LibraryBuilderTest, SeriesAndTagsAreKeptForUnchangedBooks) {
   EXPECT_EQ(fields.series, "Saga");
   EXPECT_EQ(fields.seriesIndex, "1.5");
   EXPECT_EQ(fields.tags, "Fiction\nPoetry");
+}
+
+TEST_F(LibraryBuilderTest, SeriesListsAreAlphabeticalAndInSeriesOrder) {
+  fake::add("/c.epub");
+  fake::add("/d.epub");
+  bookMetadata["/a.epub"] = {"Alpha", "Asimov", "", "", "Foundation", "2", ""};
+  bookMetadata["/b.epub"] = {"Bravo", "Asimov", "", "", "foundation", "1", ""};
+  bookMetadata["/c.epub"] = {"Charlie", "Herbert", "", "", "Dune", "1", ""};
+  bookMetadata["/d.epub"] = {"Delta", "Nobody", "", "", "", "", ""};
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, CLIX_OPTIONS_DEFAULT | CLIX_OPTION_SERIES));
+  EXPECT_FALSE(stats.listsIncomplete);
+
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  EXPECT_EQ(index.header().listOptions, CLIX_OPTIONS_DEFAULT | CLIX_OPTION_SERIES);
+  ASSERT_EQ(index.listCount(), 6);
+  ClixListDesc series{};
+  ASSERT_TRUE(index.readList(3, series));
+  EXPECT_EQ(series.role, CLIX_ROLE_SERIES);
+  EXPECT_EQ(series.icon, CLIX_ICON_SERIES);
+  EXPECT_NE(series.flags & CLIX_LIST_TOP_LEVEL, 0);
+  ClixListDesc oneSeries{};
+  ASSERT_TRUE(index.readList(4, oneSeries));
+  EXPECT_EQ(oneSeries.icon, CLIX_ICON_SERIES_ENTRY);
+  EXPECT_EQ(listContents(index, 3), (std::vector<std::string>{"4", "5"}));
+  std::string label;
+  EXPECT_EQ(listContents(index, 4, &label), std::vector<std::string>{"/c.epub"});
+  EXPECT_EQ(label, "Dune");
+  // One series whatever the case, in series order rather than title order.
+  EXPECT_EQ(listContents(index, 5, &label), (std::vector<std::string>{"/b.epub", "/a.epub"}));
+  EXPECT_EQ(label, "Foundation");
+}
+
+TEST_F(LibraryBuilderTest, TagListsMergeSpellingsAndListBooksInTitleOrder) {
+  fake::add("/c.epub");
+  bookMetadata["/a.epub"] = {"Alpha", "A", "", "", "", "", "Fiction\nFantasy"};
+  bookMetadata["/b.epub"] = {"Bravo", "B", "", "", "", "", "fiction"};
+  bookMetadata["/c.epub"] = {"Charlie", "C", "", "", "", "", "Poetry"};
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, CLIX_OPTIONS_DEFAULT | CLIX_OPTION_TAGS));
+
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  ASSERT_EQ(index.listCount(), 7);
+  EXPECT_EQ(listContents(index, 3), (std::vector<std::string>{"4", "5", "6"}));
+  std::string label;
+  EXPECT_EQ(listContents(index, 4, &label), std::vector<std::string>{"/a.epub"});
+  EXPECT_EQ(label, "Fantasy");
+  EXPECT_EQ(listContents(index, 5, &label), (std::vector<std::string>{"/a.epub", "/b.epub"}));
+  EXPECT_EQ(label, "Fiction");
+  EXPECT_EQ(listContents(index, 6, &label), std::vector<std::string>{"/c.epub"});
+  EXPECT_EQ(label, "Poetry");
+  ClixListDesc list{};
+  ASSERT_TRUE(index.readList(3, list));
+  EXPECT_EQ(list.icon, CLIX_ICON_TAGS);
+  ASSERT_TRUE(index.readList(6, list));
+  EXPECT_EQ(list.icon, CLIX_ICON_TAG);
+}
+
+TEST_F(LibraryBuilderTest, OnlyTheMostUsedTagsGetLists) {
+  fake::reset();
+  bookMetadata.clear();
+  // Tags 0..MAX_TAGS-1 are on two books each; two more are on one book each.
+  unsigned book = 0;
+  const auto addBook = [&book](const std::string& tag) {
+    const std::string path = "/book" + numbered("", book++) + ".epub";
+    fake::add(path);
+    bookMetadata[path].title = path;
+    bookMetadata[path].tags = tag;
+  };
+  for (unsigned t = 0; t < MAX_TAGS; t++) {
+    addBook(numbered("tag", t));
+    addBook(numbered("tag", t));
+  }
+  addBook("rare1");
+  addBook("rare2");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, CLIX_OPTIONS_DEFAULT | CLIX_OPTION_TAGS));
+
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  ASSERT_EQ(index.listCount(), CLIX_BUILTIN_LISTS + 1 + MAX_TAGS);
+  std::string label;
+  listContents(index, 4, &label);
+  EXPECT_EQ(label, "tag0000");
+  listContents(index, CLIX_BUILTIN_LISTS + MAX_TAGS, &label);
+  EXPECT_EQ(label, numbered("tag", MAX_TAGS - 1));
+}
+
+TEST_F(LibraryBuilderTest, FolderListMirrorsTheCardSubfoldersFirst) {
+  fake::add("/Books/c.epub");
+  fake::add("/Books/Author/d.epub");
+  fake::add("/Zed/e.epub");
+  for (const char* path : {"/a.epub", "/b.epub", "/Books/c.epub", "/Books/Author/d.epub", "/Zed/e.epub"}) {
+    bookMetadata[path].title = path;
+  }
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, CLIX_OPTIONS_DEFAULT | CLIX_OPTION_FOLDERS));
+
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  ASSERT_EQ(index.listCount(), 7);
+  ClixListDesc root{};
+  ASSERT_TRUE(index.readList(3, root));
+  EXPECT_EQ(root.kind, CLIX_LIST_MIXED);
+  EXPECT_EQ(root.role, CLIX_ROLE_FOLDERS);
+  EXPECT_EQ(root.icon, CLIX_ICON_FOLDER_TREE);
+  ClixListDesc folder{};
+  ASSERT_TRUE(index.readList(6, folder));
+  EXPECT_EQ(folder.icon, CLIX_ICON_FOLDER);
+  // Breadth first: root 3, then its folders Books 4 and Zed 5, then Author 6.
+  std::string label;
+  EXPECT_EQ(listContents(index, 3), (std::vector<std::string>{"list 4", "list 5", "/a.epub", "/b.epub"}));
+  EXPECT_EQ(listContents(index, 4, &label), (std::vector<std::string>{"list 6", "/Books/c.epub"}));
+  EXPECT_EQ(label, "Books");
+  EXPECT_EQ(listContents(index, 5, &label), std::vector<std::string>{"/Zed/e.epub"});
+  EXPECT_EQ(label, "Zed");
+  EXPECT_EQ(listContents(index, 6, &label), std::vector<std::string>{"/Books/Author/d.epub"});
+  EXPECT_EQ(label, "Author");
+}
+
+TEST_F(LibraryBuilderTest, GeneratedListsThatCannotBeAllocatedAreLeftOutWithoutFailingTheBuild) {
+  fake::add("/Books/c.epub");
+  bookMetadata["/a.epub"] = {"Alpha", "A", "", "", "Saga", "1", "Fiction"};
+  bookMetadata["/b.epub"] = {"Bravo", "B", "", "", "Saga", "2", "Poetry"};
+  initial();
+  const auto old = fake::files[INDEX]->bytes;
+
+  bool leftOut = false;
+  for (int k = 0; k < 96; k++) {
+    fake::files[INDEX]->bytes = old;
+    fake::failureTriggered = false;
+    fake::failAlloc = k;
+    const bool ok = buildLibraryIndex("/", stats, true, CLIX_OPTIONS_ALL);
+    fake::failAlloc = -1;
+    if (!fake::failureTriggered) break;
+    if (!ok) {
+      EXPECT_EQ(fake::files[INDEX]->bytes, old) << k;
+      continue;
+    }
+    LibraryIndexFile index;
+    ASSERT_TRUE(index.open(INDEX)) << k;
+    for (uint16_t id = 0; id < index.listCount(); id++) {
+      ClixListDesc list{};
+      EXPECT_TRUE(index.readList(id, list)) << k << ':' << id;
+    }
+    if (stats.listsIncomplete) {
+      leftOut = true;
+      EXPECT_NE(index.header().flags & CLIX_FLAG_LISTS_INCOMPLETE, 0);
+    }
+  }
+  EXPECT_TRUE(leftOut);
+  EXPECT_FALSE(Storage.exists("/.crosspoint/library.gen"));
+  EXPECT_FALSE(Storage.exists("/.crosspoint/library.gen.e"));
+}
+
+TEST_F(LibraryBuilderTest, ListOptionsHideBuiltinListsAndRebuildWhenChanged) {
+  initial();
+  fake::parses = 0;
+  constexpr uint8_t TITLE_ONLY = CLIX_OPTION_TITLE;
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, TITLE_ONLY));
+  EXPECT_TRUE(stats.indexReplaced) << "same books, other options";
+  EXPECT_EQ(fake::parses, 0u);
+
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  ClixListDesc list{};
+  ASSERT_TRUE(index.readList(CLIX_RECENT_LIST, list));
+  EXPECT_EQ(list.flags & CLIX_LIST_TOP_LEVEL, 0);
+  ASSERT_TRUE(index.readList(CLIX_TITLE_LIST, list));
+  EXPECT_NE(list.flags & CLIX_LIST_TOP_LEVEL, 0);
+  EXPECT_EQ(pathAt(index, SortOrder::RecentAsc, 0), "/a.epub") << "Recent is still written for search and home";
+  index.close();
+
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, TITLE_ONLY));
+  EXPECT_FALSE(stats.indexReplaced);
+}
+
+TEST_F(LibraryBuilderTest, ExternalListsMoveAfterGeneratedListsWithTheirChildren) {
+  bookMetadata["/a.epub"] = {"Alpha", "A", "", "", "Saga", "1", ""};
+  bookMetadata["/b.epub"] = {"Bravo", "B", "", "", "", "", ""};
+  initial();
+  fake::files[INDEX]->bytes = withExternalLists({
+      {CLIX_LIST_GROUPS, CLIX_LIST_TOP_LEVEL, "Mine", {}, {4}},
+      {CLIX_LIST_BOOKS, 0, "Favourites", {"/b.epub"}, {}, CLIX_ICON_HEART},
+  });
+
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, CLIX_OPTIONS_DEFAULT | CLIX_OPTION_SERIES));
+  EXPECT_FALSE(stats.listsDropped);
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  // Series 3 and Saga 4, then the external lists renumbered to 5 and 6.
+  ASSERT_EQ(index.listCount(), 7);
+  ClixListDesc favourites{};
+  ASSERT_TRUE(index.readList(6, favourites));
+  EXPECT_EQ(favourites.icon, CLIX_ICON_HEART) << "an external list keeps its icon";
+  std::string label;
+  EXPECT_EQ(listContents(index, 4, &label), std::vector<std::string>{"/a.epub"});
+  EXPECT_EQ(label, "Saga");
+  EXPECT_EQ(listContents(index, 5, &label), std::vector<std::string>{"6"});
+  EXPECT_EQ(label, "Mine");
+  EXPECT_EQ(listContents(index, 6, &label), std::vector<std::string>{"/b.epub"});
+  EXPECT_EQ(label, "Favourites");
+  index.close();
+
+  // A later build regenerates Series and carries only the external lists.
+  fake::add("/c.epub");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, CLIX_OPTIONS_DEFAULT | CLIX_OPTION_SERIES));
+  ASSERT_TRUE(index.open(INDEX));
+  ASSERT_EQ(index.listCount(), 7);
+  EXPECT_EQ(listContents(index, 5, &label), std::vector<std::string>{"6"});
+  EXPECT_EQ(label, "Mine");
 }

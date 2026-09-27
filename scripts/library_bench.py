@@ -187,10 +187,15 @@ def pick_touch_book(library):
     fail(f"no .epub found under {library}")
 
 
+# Passed to every run of both builds; set from --lists.
+EXTRA_RUNNER_ARGS = []
+
+
 def run_program(program, sd_root, arguments):
     """Run the benchmark binary; returns (BENCH records, stderr)."""
     env = dict(os.environ, CROSSPOINT_SIM_SD=str(sd_root))
-    result = subprocess.run(native([str(program), *arguments]), env=env, capture_output=True, text=True)
+    command = [str(program), *arguments, *EXTRA_RUNNER_ARGS]
+    result = subprocess.run(native(command), env=env, capture_output=True, text=True)
     if result.returncode != 0:
         sys.stderr.write(result.stderr[-4000:])
         fail(f"{program} {' '.join(arguments[:4])} ... exited with {result.returncode}")
@@ -325,8 +330,12 @@ def main():
     parser.add_argument("--orders", default=",".join(SORT_ORDERS),
                         help="sort orders for the search scenario: " + ", ".join(SORT_ORDERS))
     parser.add_argument("--no-metadata", action="store_true", help="filename-only builds")
+    parser.add_argument("--lists", type=int,
+                        help="ClixListOption bits to build, e.g. 63 for every list (builds without them ignore it)")
     parser.add_argument("--skip-build", action="store_true", help="reuse existing benchmark binaries")
     args = parser.parse_args()
+    if args.lists is not None:
+        EXTRA_RUNNER_ARGS.extend(["--lists", str(args.lists)])
 
     library = args.library.expanduser().resolve()
     if not library.is_dir():

@@ -15,6 +15,7 @@
 //     --orders LIST   comma-separated sort orders: title, author, recent (default all)
 //   --runs N          timed runs per build or per query and order (default 5)
 //   --no-metadata     build from filenames only
+//   --lists MASK      ClixListOption bits to build (ignored by builds without them)
 #if defined(SIMULATOR) && defined(CROSSPOINT_LIBRARY_BENCH)
 
 #include <HalStorage.h>
@@ -65,6 +66,7 @@ struct BenchOptions {
   Prep prep = Prep::Cold;
   const char* touchPath = nullptr;
   bool readMetadata = true;
+  int lists = 0;  // 0: the builder's default
   std::vector<const char*> queries;
   std::vector<SortChoice> orders;
 };
@@ -142,6 +144,8 @@ bool parseOptions(const int argc, char** argv, BenchOptions& options) {
       if (!parseOrders(argv[++i], options.orders)) return false;
     } else if (strcmp(arg, "--no-metadata") == 0) {
       options.readMetadata = false;
+    } else if (strcmp(arg, "--lists") == 0 && hasValue) {
+      options.lists = atoi(argv[++i]);
     } else {
       fprintf(stderr, "unknown argument %s\n", arg);
       return false;
@@ -275,12 +279,22 @@ uint16_t searchRows(library::LibraryIndexFile& index, const library::SortOrder o
 #endif
 }
 
+// Builds that predate list options (a baseline worktree) ignore --lists.
+bool buildIndex(library::BuildStats& stats, const BenchOptions& options) {
+#if __has_include(<LibraryGenerated.h>)
+  if (options.lists != 0) {
+    return library::buildLibraryIndex("/", stats, options.readMetadata, static_cast<uint8_t>(options.lists));
+  }
+#endif
+  return library::buildLibraryIndex("/", stats, options.readMetadata);
+}
+
 int runBuild(const BenchOptions& options) {
   if (options.prep != Prep::Cold) {
     // The priming build is part of the setup, not the measurement.
     Storage.removeDir("/.crosspoint");
     library::BuildStats priming;
-    if (!library::buildLibraryIndex("/", priming, options.readMetadata)) {
+    if (!buildIndex(priming, options)) {
       fprintf(stderr, "priming build failed\n");
       return 1;
     }
@@ -297,7 +311,7 @@ int runBuild(const BenchOptions& options) {
     resetSimulatorIoStats();
     library::BuildStats stats;
     const Timer timer;
-    const bool ok = library::buildLibraryIndex("/", stats, options.readMetadata);
+    const bool ok = buildIndex(stats, options);
     printBuildRun(options, run, ok, timer, stats);
     if (!ok) failures++;
   }
@@ -307,7 +321,7 @@ int runBuild(const BenchOptions& options) {
 int runSearch(const BenchOptions& options) {
   Storage.removeDir("/.crosspoint");
   library::BuildStats stats;
-  if (!library::buildLibraryIndex("/", stats, options.readMetadata)) {
+  if (!buildIndex(stats, options)) {
     fprintf(stderr, "index build failed\n");
     return 1;
   }

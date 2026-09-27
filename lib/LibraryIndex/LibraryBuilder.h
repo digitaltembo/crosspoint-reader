@@ -60,6 +60,8 @@ struct BuildStats {
   bool dedupDegraded = false;
   // The previous index held external lists and this build could not carry them.
   bool listsDropped = false;
+  // A generated list the options asked for was left out (memory or limits).
+  bool listsIncomplete = false;
 };
 
 // Walk `rootPath`, write `/.crosspoint/library.idx`, and report what happened.
@@ -70,7 +72,11 @@ struct BuildStats {
 // book over its filename. It reads an existing cache when available; otherwise
 // it stops the normal EPUB parser at the end of <metadata>, before the manifest,
 // without building the reader's spine, TOC, CSS, or section caches.
-bool buildLibraryIndex(const char* rootPath, BuildStats& stats, bool readMetadata = false);
+// `listOptions` (ClixListOption bits, from the library settings) picks which
+// top-level lists the index shows and which generated lists it holds. Series
+// and Tags come from book metadata, so they are empty without `readMetadata`.
+bool buildLibraryIndex(const char* rootPath, BuildStats& stats, bool readMetadata = false,
+                       uint8_t listOptions = CLIX_OPTIONS_DEFAULT);
 
 // Live index path, shared by the builder and activity.
 const char* libraryIndexPath();

@@ -505,12 +505,29 @@ Each is top-level only when the library settings show it
 (`header.listOptions`, below), but all three are always written because search
 and the home screen read them.
 
-Roles `series`, `tags` and `folders` mark lists the builder generates from the
-books (a series, tag or folder tree), and `generated` their child lists, which
-carry the series, tag or folder name as their label.
+The builder then writes the lists the library settings ask for, rebuilt from the
+books on every build:
+
+- **Series** (role `series`, groups): one books list per series, in series
+  index order, listed alphabetically. Books without a series are not in it.
+- **Tags** (role `tags`, groups): one books list per tag, in title order,
+  listed alphabetically. Spellings that fold alike count as one tag. The builder
+  counts the first 512 distinct tags it meets and lists the 128 most used.
+- **Folders** (role `folders`, mixed): the card's root folder. Each folder
+  lists its subfolders alphabetically, then its books in title order. Folders
+  that hold only other folders appear too. Past 1,024 folders the list is left
+  out.
+
+Their child lists have role `generated` and carry the series, tag or folder
+name as their label. Ids are assigned so every parent comes before its children.
+
+Series and Tags come from book metadata (`calibre:series` /
+`belongs-to-collection`, `dc:subject` / `schema:genre`), so they are empty when
+metadata reading is off.
 
 `header.listOptions` records which lists the build was asked for: bit 0 Recent,
-1 Title, 2 Author (top-level or not), 3 Series, 4 Tags, 5 Folders.
+1 Title, 2 Author (top-level or not), 3 Series, 4 Tags, 5 Folders. An index whose
+options differ from the settings is rebuilt, reusing every book's metadata.
 
 Lists after the generated ones are written by external tools and have role
 `external`. The reader
@@ -585,7 +602,9 @@ unreadable entry was seen, the staging files are discarded and the live index is
 left byte-for-byte unchanged. A normal rebuild action is therefore a freshness
 check, not a forced metadata reread.
 
-A rebuild that does replace the index carries external lists over. Each previous
+A rebuild that does replace the index regenerates the Series, Tags and Folders
+lists and carries external lists over, renumbered to follow the generated ones.
+Each previous
 record is matched to its new ordinal: by path during the walk, and by size for a
 rename. Every external list is then rewritten against the new ordinals:
 
