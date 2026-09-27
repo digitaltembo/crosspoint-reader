@@ -38,6 +38,8 @@ constexpr size_t NAME_BUF_SIZE = 512;
 // the display name. Fixed stride keeps the second pass a seek rather than a scan.
 constexpr size_t STAGE_NAME_BYTES = 255;
 constexpr size_t STAGE_AUTHOR_BYTES = 128;
+constexpr size_t STAGE_SERIES_INDEX_BYTES = 16;
+constexpr size_t STAGE_TAGS_BYTES = 255;
 // A folder path is stored behind one length byte in the folder section.
 constexpr size_t FOLDER_PATH_BYTES = 255;
 struct StagedEntry {
@@ -62,6 +64,14 @@ struct StagedEntry {
   // title on the other.
   uint8_t titleLen;
   char title[STAGE_NAME_BYTES];
+  // What the generated Series and Tags lists are built from; also kept in the
+  // name blob so an unchanged book needs no reparse to be listed.
+  uint8_t seriesLen;
+  char series[STAGE_AUTHOR_BYTES];
+  uint8_t seriesIndexLen;
+  char seriesIndex[STAGE_SERIES_INDEX_BYTES];
+  uint8_t tagsLen;
+  char tags[STAGE_TAGS_BYTES];  // '\n'-joined, cut at a whole tag
 };
 constexpr size_t STAGE_STRIDE = sizeof(StagedEntry);
 constexpr uint16_t NO_ORDINAL = 0xFFFF;
@@ -298,6 +308,39 @@ int findPrior(WalkState& st, const uint64_t pathHash) {
   return -1;
 }
 
+// Up to `cap` bytes of `value` in a staged field, cut at a UTF-8 boundary.
+uint8_t stageText(const std::string& value, char* out, const size_t cap) {
+  const int len = utf8SafeTruncateBuffer(value.data(), static_cast<int>(std::min(value.size(), cap)));
+  memcpy(out, value.data(), static_cast<size_t>(len));
+  return static_cast<uint8_t>(len);
+}
+
+// Tags are cut at the last whole tag that fits, never mid-tag.
+uint8_t stageTags(const std::string& joined, char* out) {
+  size_t len = joined.size();
+  if (len > STAGE_TAGS_BYTES) {
+    const size_t cut = joined.rfind('\n', STAGE_TAGS_BYTES);
+    len = cut == std::string::npos ? 0 : cut;
+  }
+  memcpy(out, joined.data(), len);
+  return static_cast<uint8_t>(len);
+}
+
+// The reused fields of an unchanged book, in one blob read. Its own frame keeps
+// the six strings off stageRecord's.
+[[gnu::noinline]] bool readReusedFields(LibraryIndexFile& previous, const ClixRecord& record, StagedEntry& entry,
+                                        std::string& title, std::string& author, std::string& authorSort) {
+  RebuildFields fields;
+  if (!previous.readRebuildFields(record, fields)) return false;
+  title = std::move(fields.title);
+  author = std::move(fields.sourceAuthor);
+  authorSort = std::move(fields.authorSort);
+  entry.seriesLen = stageText(fields.series, entry.series, sizeof(entry.series));
+  entry.seriesIndexLen = stageText(fields.seriesIndex, entry.seriesIndex, sizeof(entry.seriesIndex));
+  entry.tagsLen = stageTags(fields.tags, entry.tags);
+  return true;
+}
+
 // parentBasename and depth are gone with the folder-as-author rule they served:
 // nothing about a book's surroundings names its author any more.
 [[gnu::noinline]] bool stageRecord(WalkState& st, const std::string& name, const uint32_t fileSize,
@@ -335,7 +378,7 @@ int findPrior(WalkState& st, const uint64_t pathHash) {
 
   if (reuseMetadata) {
     // One read per unchanged book: this runs for every book on every freshness check.
-    if (!st.previous->readRebuildFields(priorRecord, title, author, authorSort)) {
+    if (!readReusedFields(*st.previous, priorRecord, entry, title, author, authorSort)) {
       st.failed = true;
       return false;
     }
@@ -366,6 +409,9 @@ int findPrior(WalkState& st, const uint64_t pathHash) {
       if (st.extended) {
         titleSort = std::move(st.extended->titleSort);
         authorSort = std::move(st.extended->authorSort);
+        entry.seriesLen = stageText(st.extended->series, entry.series, sizeof(entry.series));
+        entry.seriesIndexLen = stageText(st.extended->seriesIndex, entry.seriesIndex, sizeof(entry.seriesIndex));
+        entry.tagsLen = stageTags(st.extended->tags, entry.tags);
       }
     } else {
       entry.record.metadataStatus = CLIX_METADATA_FAILED;
@@ -572,7 +618,8 @@ void walk(WalkState& st, const std::string& path, const int depth) {
 // truth.
 uint32_t blobBytesFor(const StagedEntry& entry, const StagedEntry& canonical) {
   return sizeof(entry.pathHash) + entry.record.nameLen + 1u + canonical.authorLen + 1u + entry.titleLen + 1u +
-         entry.authorLen + 1u + entry.authorSortLen;
+         entry.authorLen + 1u + entry.authorSortLen + 1u + entry.seriesLen + 1u + entry.seriesIndexLen + 1u +
+         entry.tagsLen;
 }
 
 // External lists read back from the previous index and rewritten against this
@@ -602,11 +649,14 @@ bool carryEntries(ListCarry& carry, const uint16_t id, const ClixListDesc& list,
     for (uint16_t k = 0; k < batch; k++) {
       serviceBuilder(serviceUnits);
       uint16_t entry = carry.chunk[k];
-      if (list.kind == CLIX_LIST_BOOKS) {
+      const bool isList =
+          list.kind == CLIX_LIST_GROUPS || (list.kind == CLIX_LIST_MIXED && (entry & CLIX_ENTRY_LIST_BIT) != 0);
+      if (isList) {
+        const uint16_t child = entry & static_cast<uint16_t>(~CLIX_ENTRY_LIST_BIT);
+        if (child <= id || child >= carry.listCount || carry.counts[child] == 0) continue;
+      } else {
         if (entry >= carry.previous.bookCount() || carry.newOrdinal[entry] == NO_ORDINAL) continue;
         entry = carry.newOrdinal[entry];
-      } else if (entry <= id || entry >= carry.listCount || carry.counts[entry] == 0) {
-        continue;
       }
       if (out) out->write(&entry, sizeof(entry));
       count++;
@@ -675,7 +725,7 @@ void writeLists(serialization::BufferedFileWriter& out, ListCarry* carry, const 
     ClixListDesc list{};
     if (!carry->previous.readList(id, list)) {
       ioFailed = carry->previous.ioFailed();
-      list = ClixListDesc{CLIX_LIST_BOOKS, CLIX_ROLE_EXTERNAL, 0, 0, 0, 0, entryCursor, 0};
+      list = ClixListDesc{CLIX_LIST_BOOKS, CLIX_ROLE_EXTERNAL, 0, 0, 0, 0, 0, entryCursor, 0};
     } else {
       list.entryCount = carry->counts[id];
       list.entriesOff = list.kind == CLIX_LIST_IDENTITY ? 0 : entryCursor;
@@ -1210,6 +1260,12 @@ bool emitIndex(const char* folderStagePath, WalkState& st, const uint16_t* order
     if (entry.authorLen > 0) put(entry.author, entry.authorLen);
     put(&entry.authorSortLen, 1);
     if (entry.authorSortLen > 0) put(entry.authorSort, entry.authorSortLen);
+    put(&entry.seriesLen, 1);
+    if (entry.seriesLen > 0) put(entry.series, entry.seriesLen);
+    put(&entry.seriesIndexLen, 1);
+    if (entry.seriesIndexLen > 0) put(entry.seriesIndex, entry.seriesIndexLen);
+    put(&entry.tagsLen, 1);
+    if (entry.tagsLen > 0) put(entry.tags, entry.tagsLen);
     blobWritten += blobBytesFor(entry, canonical);
   }
   header.nameLen = blobWritten;

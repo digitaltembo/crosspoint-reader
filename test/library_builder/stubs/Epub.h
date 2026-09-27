@@ -21,6 +21,9 @@ struct FakeMetadata {
   std::string author = "Author";
   std::string titleSort;
   std::string authorSort;
+  std::string series;
+  std::string seriesIndex;
+  std::string tags;
   bool success = true;
 };
 
@@ -42,6 +45,9 @@ class Epub {
     if (extended) {
       extended->titleSort = metadata.titleSort;
       extended->authorSort = metadata.authorSort;
+      extended->series = metadata.series;
+      extended->seriesIndex = metadata.seriesIndex;
+      extended->tags = metadata.tags;
     }
     return true;
   }

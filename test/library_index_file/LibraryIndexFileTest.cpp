@@ -191,11 +191,11 @@ TEST(LibraryIndexFile, ReadsPartialAndNestedExternalLists) {
   constexpr uint16_t LISTS = 7;
   Image image = makeImage(3, 0, 0, {}, {}, LISTS, 64);
   const uint32_t base = image.externalStart();
-  image.setList(3, {library::CLIX_LIST_GROUPS, library::CLIX_ROLE_EXTERNAL, library::CLIX_LIST_TOP_LEVEL, 4, 2, 0, base,
-                    base + 40});
-  image.setList(4, {library::CLIX_LIST_BOOKS, library::CLIX_ROLE_EXTERNAL, 0, 7, 2, 0, base + 4, base + 44});
-  image.setList(5, {library::CLIX_LIST_BOOKS, library::CLIX_ROLE_EXTERNAL, 0, 0, 1, 0, base + 8, 0});
-  image.setList(6, {library::CLIX_LIST_GROUPS, library::CLIX_ROLE_EXTERNAL, 0, 0, 1, 0, base + 10, 0});
+  image.setList(3, {library::CLIX_LIST_GROUPS, library::CLIX_ROLE_EXTERNAL, library::CLIX_LIST_TOP_LEVEL, 4, 2, 0, 0,
+                    base, base + 40});
+  image.setList(4, {library::CLIX_LIST_BOOKS, library::CLIX_ROLE_EXTERNAL, 0, 7, 2, 0, 0, base + 4, base + 44});
+  image.setList(5, {library::CLIX_LIST_BOOKS, library::CLIX_ROLE_EXTERNAL, 0, 0, 1, 0, 0, base + 8, 0});
+  image.setList(6, {library::CLIX_LIST_GROUPS, library::CLIX_ROLE_EXTERNAL, 0, 0, 1, 0, 0, base + 10, 0});
   image.setEntries(base, {4, 5, 2, 0, 1, 3});
   std::memcpy(image.list(base + 40), "TagsFiction", 11);
   Storage.setFile("/library.clx", std::move(image.bytes));
@@ -233,11 +233,34 @@ TEST(LibraryIndexFile, ReadsPartialAndNestedExternalLists) {
   EXPECT_FALSE(index.readList(LISTS, builtin));
 }
 
+TEST(LibraryIndexFile, MixedListsHoldBooksAndLaterListsOnly) {
+  // List 3: Mixed {list 4, book 1, list 3 (itself), book 7 (no such book)}.
+  // List 4: Books {0}.
+  constexpr uint16_t LISTS = 5;
+  Image image = makeImage(2, 0, 0, {}, {}, LISTS, 16);
+  const uint32_t base = image.externalStart();
+  image.setList(
+      3, {library::CLIX_LIST_MIXED, library::CLIX_ROLE_FOLDERS, library::CLIX_LIST_TOP_LEVEL, 0, 4, 0, 0, base, 0});
+  image.setList(4, {library::CLIX_LIST_BOOKS, library::CLIX_ROLE_GENERATED, 0, 0, 1, 0, 0, base + 8, 0});
+  const uint16_t bit = library::CLIX_ENTRY_LIST_BIT;
+  image.setEntries(base, {static_cast<uint16_t>(bit | 4), 1, static_cast<uint16_t>(bit | 3), 7, 0});
+  Storage.setFile("/library.clx", std::move(image.bytes));
+
+  library::LibraryIndexFile index;
+  ASSERT_TRUE(index.open("/library.clx"));
+  library::ClixListDesc mixed{};
+  ASSERT_TRUE(index.readList(3, mixed));
+  EXPECT_EQ(index.entryAt(3, mixed, 0, false), bit | 4);
+  EXPECT_EQ(index.entryAt(3, mixed, 1, false), 1);
+  EXPECT_EQ(index.entryAt(3, mixed, 2, false), 0xFFFF) << "a list naming itself is a cycle";
+  EXPECT_EQ(index.entryAt(3, mixed, 3, false), 0xFFFF) << "no such book";
+}
+
 TEST(LibraryIndexFile, RejectsExternalListsThatOverrunTheSection) {
   Image image = makeImage(2, 0, 0, {}, {}, 4, 8);
   const uint32_t base = image.externalStart();
   image.setList(
-      3, {library::CLIX_LIST_BOOKS, library::CLIX_ROLE_EXTERNAL, library::CLIX_LIST_TOP_LEVEL, 0, 5, 0, base, 0});
+      3, {library::CLIX_LIST_BOOKS, library::CLIX_ROLE_EXTERNAL, library::CLIX_LIST_TOP_LEVEL, 0, 5, 0, 0, base, 0});
   Storage.setFile("/library.clx", std::move(image.bytes));
 
   library::LibraryIndexFile index;

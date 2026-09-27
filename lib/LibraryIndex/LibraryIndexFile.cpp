@@ -113,6 +113,11 @@ uint16_t LibraryIndexFile::entryAt(const uint16_t listId, const ClixListDesc& li
   uint16_t entry = NONE;
   if (!readListEntries(list, k, 1, &entry)) return NONE;
   if (list.kind == CLIX_LIST_BOOKS) return entry < head.bookCount ? entry : NONE;
+  if (list.kind == CLIX_LIST_MIXED) {
+    if ((entry & CLIX_ENTRY_LIST_BIT) == 0) return entry < head.bookCount ? entry : NONE;
+    const uint16_t child = entry & static_cast<uint16_t>(~CLIX_ENTRY_LIST_BIT);
+    return child > listId && child < head.listCount ? entry : NONE;
+  }
   return entry > listId && entry < head.listCount ? entry : NONE;
 }
 
@@ -342,19 +347,25 @@ bool LibraryIndexFile::readAuthorAndTitle(const ClixRecord& record, std::string&
   return true;
 }
 
-bool LibraryIndexFile::readRebuildFields(const ClixRecord& record, std::string& title, std::string& sourceAuthor,
-                                         std::string& authorSort) {
-  sourceAuthor.clear();
-  authorSort.clear();
-  uint32_t offsets[4];
-  uint8_t lengths[4];
-  // Fields: display author, title, source author, author sort. `title` doubles
-  // as the read buffer; its own field is cut out of it last.
-  if (!readBlobFields(record, 4, title, offsets, lengths)) return false;
-  sourceAuthor.assign(title, offsets[2], lengths[2]);
-  authorSort.assign(title, offsets[3], lengths[3]);
-  title.erase(0, offsets[1]);
-  title.resize(lengths[1]);
+bool LibraryIndexFile::readRebuildFields(const ClixRecord& record, RebuildFields& out) {
+  constexpr uint8_t FIELDS = 7;
+  uint32_t offsets[FIELDS];
+  uint8_t lengths[FIELDS];
+  // Fields: display author, title, source author, author sort, series, series
+  // index, tags. `title` doubles as the read buffer; its own field is cut out of
+  // it last.
+  std::string& buf = out.title;
+  if (!readBlobFields(record, FIELDS, buf, offsets, lengths)) {
+    out = RebuildFields{};
+    return false;
+  }
+  out.sourceAuthor.assign(buf, offsets[2], lengths[2]);
+  out.authorSort.assign(buf, offsets[3], lengths[3]);
+  out.series.assign(buf, offsets[4], lengths[4]);
+  out.seriesIndex.assign(buf, offsets[5], lengths[5]);
+  out.tags.assign(buf, offsets[6], lengths[6]);
+  buf.erase(0, offsets[1]);
+  buf.resize(lengths[1]);
   return true;
 }
 

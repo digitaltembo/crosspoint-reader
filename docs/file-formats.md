@@ -458,7 +458,7 @@ fold bump rebuilds ranks while preserving `firstSeen`.
 Fold version 4 preserves leading articles in title sort and search keys.
 Fold version 5 folds the book's title sort (`file-as`) into `fold`, orders the
 Author list by the author's `file-as`, and appends the author-sort field to the
-name blob.
+name blob. Fold version 6 appends the series, series index and tags fields.
 
 Sections are 512-byte aligned so each starts on an SD block boundary.
 
@@ -469,15 +469,25 @@ are relative to `listStart`, so entries and labels may sit anywhere in the
 section:
 
 ```text
-[u8 kind]        0 identity, 1 books, 2 groups
-[u8 role]        0 external, 1 recent, 2 title, 3 author
+[u8 kind]        0 identity, 1 books, 2 groups, 3 mixed
+[u8 role]        0 external, 1 recent, 2 title, 3 author,
+                 4 series, 5 tags, 6 folders, 7 generated
 [u8 flags]       bit 0: top-level (shown as a tab or in the list picker)
 [u8 labelLen]
 [u16 entryCount] rows; bookCount for an identity list
-[u16 reserved]
+[u8 icon]        0 default, 1 list, 2 folder, 3 folder tree, 4 book,
+                 5 books, 6 recent, 7 title, 8 author, 9 series,
+                 10 one series, 11 tags, 12 tag, 13 bookmark, 14 star, 15 heart
+[u8 reserved]
 [u32 entriesOff] u16[entryCount]; unused by an identity list
 [u32 labelOff]   UTF-8, labelLen bytes
 ```
+
+The icon is shown beside the list's row. `default`, or a value the firmware
+does not know, falls back to one for the role (recent, title, author, series,
+tags, folder tree), then to one for the kind (list for books, folder for groups
+and mixed). The builder writes an icon for every list it generates; external
+tools may pick any.
 
 - **Identity** lists every record in record (title) order and stores no
   entries.
@@ -486,13 +496,24 @@ section:
 - **Groups** entries are ids of other lists, each of which opens as its own row.
   An entry is valid only when it names a *later* list, so nesting can be any
   depth and can never form a cycle.
+- **Mixed** entries are either: with bit 15 (`0x8000`) set, the low bits are a
+  later list's id; without it, a record ordinal.
 
 Lists 0, 1 and 2 are always Recent (books, every record), Title (identity) and
-Author (books, every record), all top-level. They carry no label; the firmware
-names them. The builder writes only these three, with their entries directly
-after the table.
+Author (books, every record). They carry no label; the firmware names them.
+Each is top-level only when the library settings show it
+(`header.listOptions`, below), but all three are always written because search
+and the home screen read them.
 
-Later lists are written by external tools and have role `external`. The reader
+Roles `series`, `tags` and `folders` mark lists the builder generates from the
+books (a series, tag or folder tree), and `generated` their child lists, which
+carry the series, tag or folder name as their label.
+
+`header.listOptions` records which lists the build was asked for: bit 0 Recent,
+1 Title, 2 Author (top-level or not), 3 Series, 4 Tags, 5 Folders.
+
+Lists after the generated ones are written by external tools and have role
+`external`. The reader
 validates the three built-in descriptors on open. It checks each external
 descriptor's bounds when that list is read, and each entry's value as it is read.
 The library screen shows up to four top-level lists as tabs; with more, one tab
@@ -537,6 +558,9 @@ Per record, at `nameStart + nameOff`:
 [u8][title]      the book's own title, or length 0 if it never gave one
 [u8][source]     cleaned author spelling before the library-wide spelling vote
 [u8][authorSort] the book's primary-author file-as, or length 0 if it never gave one
+[u8][series]     the book's series, or length 0
+[u8][seriesIdx]  its position in the series as written ("3", "1.5"), or length 0
+[u8][tags]       its tags joined with '\n', cut at a whole tag to fit 255 bytes
 ```
 
 The filename must stay the first textual field and stay the filename: `readPath`
@@ -593,6 +617,10 @@ make a real book disappear.
 could not carry over, because the mapping could not be allocated or the previous
 lists could not be read. The build itself still succeeds, with only the built-in
 lists.
+
+`LISTS_INCOMPLETE` says a generated list the settings asked for was left out,
+because its working memory could not be allocated or it would pass the list or
+folder limits. The other lists are still written.
 
 `selfSize` is the expected file size. Comparing it against the real one is a free
 truncation guard: a build cut short by a power failure cannot pass.

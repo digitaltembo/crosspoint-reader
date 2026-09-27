@@ -88,6 +88,13 @@ TEST(LibraryFormat, BuiltinListsAreValidAndTheirEntriesFollowTheWholeTable) {
   EXPECT_EQ(lists[CLIX_AUTHOR_LIST].entriesOff, 248u);
   EXPECT_EQ(lists[CLIX_AUTHOR_LIST].entriesOff + 200u, h.listLen);
 
+  // Only the options' built-in lists are top-level; all three are still written.
+  builtinListDescs(lists, h.bookCount, h.listCount, CLIX_OPTION_TITLE | CLIX_OPTION_TAGS);
+  EXPECT_EQ(lists[CLIX_RECENT_LIST].flags & CLIX_LIST_TOP_LEVEL, 0);
+  EXPECT_NE(lists[CLIX_TITLE_LIST].flags & CLIX_LIST_TOP_LEVEL, 0);
+  EXPECT_EQ(lists[CLIX_AUTHOR_LIST].flags & CLIX_LIST_TOP_LEVEL, 0);
+  for (uint16_t id = 0; id < CLIX_BUILTIN_LISTS; id++) EXPECT_TRUE(validateListDesc(h, id, lists[id])) << id;
+
   // With external lists the table grows and the built-in entries move past it.
   builtinListDescs(lists, h.bookCount, 10);
   EXPECT_EQ(lists[CLIX_RECENT_LIST].entriesOff, 160u);
@@ -98,7 +105,7 @@ TEST(LibraryFormat, ExternalListDescriptorsAreBoundedByTheListSection) {
   ClixHeader h = makeHeader(100, 116);
   h.listCount = 5;
   h.listLen = 1000;
-  const ClixListDesc books{CLIX_LIST_BOOKS, CLIX_ROLE_EXTERNAL, 0, 3, 40, 0, 900, 997};
+  const ClixListDesc books{CLIX_LIST_BOOKS, CLIX_ROLE_EXTERNAL, 0, 3, 40, CLIX_ICON_STAR, 0, 900, 997};
   EXPECT_TRUE(validateListDesc(h, 3, books));
   EXPECT_FALSE(validateListDesc(h, 5, books)) << "id past the table";
 
@@ -115,16 +122,49 @@ TEST(LibraryFormat, ExternalListDescriptorsAreBoundedByTheListSection) {
   bad.role = CLIX_ROLE_AUTHOR;
   EXPECT_FALSE(validateListDesc(h, 3, bad)) << "external ids cannot claim a built-in role";
   bad = books;
-  bad.kind = 3;
+  bad.kind = CLIX_LIST_MIXED + 1;
   EXPECT_FALSE(validateListDesc(h, 3, bad));
+  bad = books;
+  bad.role = CLIX_ROLE_GENERATED + 1;
+  EXPECT_FALSE(validateListDesc(h, 3, bad));
+
+  // Generated lists take the roles past Author, and a Folders tree is Mixed.
+  ClixListDesc generated = books;
+  for (const uint8_t role : {CLIX_ROLE_SERIES, CLIX_ROLE_TAGS, CLIX_ROLE_FOLDERS, CLIX_ROLE_GENERATED}) {
+    generated.role = role;
+    EXPECT_TRUE(validateListDesc(h, 3, generated)) << static_cast<int>(role);
+  }
+  generated.kind = CLIX_LIST_MIXED;
+  EXPECT_TRUE(validateListDesc(h, 3, generated));
 
   // A Books list may name fewer books than the library holds, but an identity
   // list is the whole record order.
-  const ClixListDesc identity{CLIX_LIST_IDENTITY, CLIX_ROLE_EXTERNAL, 0, 0, 100, 0, UINT32_MAX, 0};
+  const ClixListDesc identity{CLIX_LIST_IDENTITY, CLIX_ROLE_EXTERNAL, 0, 0, 100, 0, 0, UINT32_MAX, 0};
   EXPECT_TRUE(validateListDesc(h, 4, identity));
   bad = identity;
   bad.entryCount = 99;
   EXPECT_FALSE(validateListDesc(h, 4, bad));
+}
+
+TEST(LibraryFormat, ListIconsFallBackToRoleThenKind) {
+  ClixListDesc lists[CLIX_BUILTIN_LISTS];
+  builtinListDescs(lists, 100, CLIX_BUILTIN_LISTS);
+  EXPECT_EQ(listIcon(lists[CLIX_RECENT_LIST]), CLIX_ICON_RECENT);
+  EXPECT_EQ(listIcon(lists[CLIX_TITLE_LIST]), CLIX_ICON_TITLE);
+  EXPECT_EQ(listIcon(lists[CLIX_AUTHOR_LIST]), CLIX_ICON_AUTHOR);
+
+  ClixListDesc list{CLIX_LIST_BOOKS, CLIX_ROLE_EXTERNAL, 0, 0, 0, CLIX_ICON_HEART, 0, 0, 0};
+  EXPECT_EQ(listIcon(list), CLIX_ICON_HEART) << "a list's own icon wins";
+  list.icon = CLIX_ICON_HEART + 1;
+  EXPECT_EQ(listIcon(list), CLIX_ICON_LIST) << "an unknown icon falls back to the kind";
+  list.icon = CLIX_ICON_DEFAULT;
+  list.kind = CLIX_LIST_GROUPS;
+  EXPECT_EQ(listIcon(list), CLIX_ICON_FOLDER);
+  list.role = CLIX_ROLE_TAGS;
+  EXPECT_EQ(listIcon(list), CLIX_ICON_TAGS) << "the role comes before the kind";
+  list.role = CLIX_ROLE_FOLDERS;
+  list.kind = CLIX_LIST_MIXED;
+  EXPECT_EQ(listIcon(list), CLIX_ICON_FOLDER_TREE);
 }
 
 TEST(LibraryFormat, BuiltinListsCannotBeReplaced) {
@@ -296,6 +336,7 @@ TEST(LibraryFormat, ByteImageIsStableAcrossBuilds) {
   EXPECT_EQ(offsetof(ClixHeader, selfSize), 40u);
   EXPECT_EQ(offsetof(ClixHeader, listLen), 44u);
   EXPECT_EQ(offsetof(ClixHeader, listCount), 48u);
+  EXPECT_EQ(offsetof(ClixHeader, listOptions), 50u);
 
   EXPECT_EQ(offsetof(ClixListDesc, entryCount), 4u);
   EXPECT_EQ(offsetof(ClixListDesc, entriesOff), 8u);

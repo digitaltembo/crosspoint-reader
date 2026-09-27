@@ -36,6 +36,15 @@ struct BookIdentity {
   uint32_t fileSize;
 };
 
+struct RebuildFields {
+  std::string title;
+  std::string sourceAuthor;
+  std::string authorSort;
+  std::string series;
+  std::string seriesIndex;
+  std::string tags;  // joined with '\n'
+};
+
 class LibraryIndexFile {
  public:
   LibraryIndexFile() = default;
@@ -73,8 +82,9 @@ class LibraryIndexFile {
   bool readList(uint16_t id, ClixListDesc& out);
   // Entry at display position `row` of list `listId`, reading `list` (its
   // descriptor) backwards when `descending`: a record ordinal for an identity or
-  // Books list, a child list id for a Groups list. 0xFFFF when out of range or
-  // invalid; a Groups entry is valid only when it names a LATER list, which is
+  // Books list, a child list id for a Groups list, and for a Mixed list either,
+  // with CLIX_ENTRY_LIST_BIT marking a list. 0xFFFF when out of range or
+  // invalid; a list entry is valid only when it names a LATER list, which is
   // what keeps nesting free of cycles.
   uint16_t entryAt(uint16_t listId, const ClixListDesc& list, uint16_t row, bool descending);
   // `count` raw entries of a Books or Groups list starting at `first`, without
@@ -111,11 +121,10 @@ class LibraryIndexFile {
   // readAuthor and readTitle in one read, for scans that need both per record.
   // Both may come back empty; false only when the blob cannot be read.
   bool readAuthorAndTitle(const ClixRecord& record, std::string& author, std::string& title);
-  // readTitle, readSourceAuthor and readAuthorSort in one read: what a rebuild
+  // Every blob field after the display author, in one read: what a rebuild
   // reuses from an unchanged book. Any may come back empty; false only when the
   // blob cannot be read.
-  bool readRebuildFields(const ClixRecord& record, std::string& title, std::string& sourceAuthor,
-                         std::string& authorSort);
+  bool readRebuildFields(const ClixRecord& record, RebuildFields& out);
 
   // Absolute path of the book, rebuilt from its folder record.
   bool readPath(const ClixRecord& record, std::string& out);

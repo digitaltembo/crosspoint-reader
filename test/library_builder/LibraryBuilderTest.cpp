@@ -79,6 +79,7 @@ struct ExternalList {
   std::string label;
   std::vector<std::string> books;
   std::vector<uint16_t> children;
+  uint8_t icon = CLIX_ICON_DEFAULT;
 };
 
 // The live index with `lists` appended after the built-in ones, written the way
@@ -114,6 +115,7 @@ std::vector<uint8_t> withExternalLists(const std::vector<ExternalList>& lists) {
                                      lists[i].flags,
                                      static_cast<uint8_t>(lists[i].label.size()),
                                      static_cast<uint16_t>(values.size()),
+                                     lists[i].icon,
                                      0,
                                      static_cast<uint32_t>(entriesStart + entries.size() * sizeof(uint16_t)),
                                      static_cast<uint32_t>(labels.size())};
@@ -148,6 +150,10 @@ std::vector<std::string> listContents(LibraryIndexFile& index, const uint16_t id
     const uint16_t entry = index.entryAt(id, list, row, false);
     if (list.kind == CLIX_LIST_GROUPS) {
       out.push_back(std::to_string(entry));
+      continue;
+    }
+    if (list.kind == CLIX_LIST_MIXED && entry != 0xFFFF && (entry & CLIX_ENTRY_LIST_BIT) != 0) {
+      out.push_back("list " + std::to_string(entry & ~CLIX_ENTRY_LIST_BIT));
       continue;
     }
     ClixRecord record{};
@@ -629,13 +635,11 @@ TEST_F(LibraryBuilderTest, ReusedRecordsKeepSortKeysWithoutParsing) {
   ASSERT_TRUE(index.readAuthorSort(record, authorSort));
   EXPECT_EQ(authorSort, "Lu, Xun");
 
-  std::string title;
-  std::string sourceAuthor;
-  authorSort.clear();
-  ASSERT_TRUE(index.readRebuildFields(record, title, sourceAuthor, authorSort));
-  EXPECT_EQ(title, "The Hobbit");
-  EXPECT_EQ(sourceAuthor, "Lu Xun");
-  EXPECT_EQ(authorSort, "Lu, Xun");
+  RebuildFields fields;
+  ASSERT_TRUE(index.readRebuildFields(record, fields));
+  EXPECT_EQ(fields.title, "The Hobbit");
+  EXPECT_EQ(fields.sourceAuthor, "Lu Xun");
+  EXPECT_EQ(fields.authorSort, "Lu, Xun");
 }
 
 TEST_F(LibraryBuilderTest, SearchMatchesTitleSortShownTitleAndAuthorInDisplayOrder) {
@@ -684,14 +688,13 @@ TEST_F(LibraryBuilderTest, BlobFieldsLongerThanTheFirstReadChunkAreReadWhole) {
   ASSERT_TRUE(index.open(INDEX));
   ClixRecord record{};
   ASSERT_TRUE(index.readRecord(0, record));
-  std::string title;
-  std::string sourceAuthor;
-  std::string authorSort;
-  ASSERT_TRUE(index.readRebuildFields(record, title, sourceAuthor, authorSort));
-  EXPECT_EQ(title, longTitle);
-  EXPECT_EQ(sourceAuthor, longAuthor);
-  EXPECT_EQ(authorSort, longSort);
+  RebuildFields fields;
+  ASSERT_TRUE(index.readRebuildFields(record, fields));
+  EXPECT_EQ(fields.title, longTitle);
+  EXPECT_EQ(fields.sourceAuthor, longAuthor);
+  EXPECT_EQ(fields.authorSort, longSort);
 
+  std::string title;
   std::string author;
   ASSERT_TRUE(index.readAuthorAndTitle(record, author, title));
   EXPECT_EQ(author, longAuthor);
@@ -817,4 +820,23 @@ TEST_F(LibraryBuilderTest, ExternalListsThatCannotBeCarriedAreDroppedWithoutFail
     EXPECT_EQ(index.bookCount(), 2);
   }
   EXPECT_TRUE(dropped);
+}
+
+TEST_F(LibraryBuilderTest, SeriesAndTagsAreKeptForUnchangedBooks) {
+  bookMetadata["/a.epub"] = {"Alpha", "A", "", "", "Saga", "1.5", "Fiction\nPoetry"};
+  initial();
+  fake::add("/c.epub");
+  fake::parses = 0;
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_EQ(fake::parses, 1u) << "only the new book is parsed";
+
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  ClixRecord record{};
+  ASSERT_TRUE(index.readRecord(ordinalOf(index, "/a.epub"), record));
+  RebuildFields fields;
+  ASSERT_TRUE(index.readRebuildFields(record, fields));
+  EXPECT_EQ(fields.series, "Saga");
+  EXPECT_EQ(fields.seriesIndex, "1.5");
+  EXPECT_EQ(fields.tags, "Fiction\nPoetry");
 }

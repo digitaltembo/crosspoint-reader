@@ -45,7 +45,7 @@ types:
       - id: format_version
         contents: [3]
       - id: fold_version
-        contents: [5]
+        contents: [6]
       - id: flags
         type: clix_flags
       - id: metadata_enabled
@@ -83,8 +83,11 @@ types:
       - id: list_count
         type: u2
         doc: Descriptors in the list table; at least 3.
+      - id: list_options
+        type: list_options
+        doc: The lists the library settings asked this build for.
       - id: reserved
-        size: 14
+        size: 13
 
     types:
       clix_flags:
@@ -98,8 +101,31 @@ types:
           - id: lists_dropped
             type: b1
             doc: External lists from the previous index could not be carried over.
+          - id: lists_incomplete
+            type: b1
+            doc: A generated list the settings asked for was left out.
           - id: reserved
-            type: b5
+            type: b4
+
+      list_options:
+        meta:
+          bit-endian: le
+        seq:
+          - id: recent
+            type: b1
+            doc: Recent is top-level (it is always written).
+          - id: title
+            type: b1
+          - id: author
+            type: b1
+          - id: series
+            type: b1
+          - id: tags
+            type: b1
+          - id: folders
+            type: b1
+          - id: reserved
+            type: b2
 
   folder_section:
     seq:
@@ -206,6 +232,26 @@ types:
             type: str
             size: author_sort_len
             encoding: UTF-8
+          - id: series_len
+            type: u1
+          - id: series
+            type: str
+            size: series_len
+            encoding: UTF-8
+          - id: series_index_len
+            type: u1
+          - id: series_index
+            doc: Position in the series as written, e.g. "3" or "1.5"
+            type: str
+            size: series_index_len
+            encoding: UTF-8
+          - id: tags_len
+            type: u1
+          - id: tags
+            doc: Tags joined with '\n', cut at a whole tag
+            type: str
+            size: tags_len
+            encoding: UTF-8
 
   list_section:
     seq:
@@ -230,8 +276,14 @@ types:
       - id: entry_count
         type: u2
         doc: Rows in the list; book_count for an identity list.
+      - id: icon
+        type: u1
+        enum: list_icon
+        doc: >
+          Icon beside the list's row. default, or a value the firmware does not
+          know, falls back to one for the role, then the kind.
       - id: reserved
-        type: u2
+        type: u1
       - id: entries_off
         type: u4
         doc: From list_start. Unused by an identity list.
@@ -249,7 +301,8 @@ types:
         if: kind != list_kind::identity
         doc: >
           Record ordinals for a books list; ids of LATER lists for a groups
-          list, which is what keeps nesting free of cycles.
+          list, which is what keeps nesting free of cycles; for a mixed list,
+          a later list's id with bit 15 set, else a record ordinal.
       label:
         io: _parent._io
         pos: label_off
@@ -283,8 +336,30 @@ enums:
     0: identity
     1: books
     2: groups
+    3: mixed
   list_role:
     0: external
     1: recent
     2: title
     3: author
+    4: series
+    5: tags
+    6: folders
+    7: generated
+  list_icon:
+    0: default
+    1: list
+    2: folder
+    3: folder_tree
+    4: book
+    5: books
+    6: recent
+    7: title
+    8: author
+    9: series
+    10: series_entry
+    11: tags
+    12: tag
+    13: bookmark
+    14: star
+    15: heart
