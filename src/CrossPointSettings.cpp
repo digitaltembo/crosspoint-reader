@@ -262,7 +262,7 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   }
   // At least one list stays shown; anything else falls back to the default.
   if (doc["libraryLists"].is<uint8_t>()) {
-    const uint8_t lists = doc["libraryLists"].as<uint8_t>() & 0x3F;
+    const uint8_t lists = doc["libraryLists"].as<uint8_t>() & 0x7F;
     libraryLists = lists != 0 ? lists : 0x07;
   }
 

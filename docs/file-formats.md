@@ -471,7 +471,7 @@ section:
 ```text
 [u8 kind]        0 identity, 1 books, 2 groups, 3 mixed
 [u8 role]        0 external, 1 recent, 2 title, 3 author,
-                 4 series, 5 tags, 6 folders, 7 generated
+                 4 series, 5 tags, 6 folders, 7 generated, 8 custom
 [u8 flags]       bit 0: top-level (shown as a tab or in the list picker)
 [u8 labelLen]
 [u16 entryCount] rows; bookCount for an identity list
@@ -517,24 +517,58 @@ books on every build:
   lists its subfolders alphabetically, then its books in title order. Folders
   that hold only other folders appear too. Past 1,024 folders the list is left
   out.
+- **Custom** (role `custom`, groups, labelled): one list per entry of the
+  custom lists file (below), of one books list per sublist that matches any
+  book, in file order, each in title order.
 
-Their child lists have role `generated` and carry the series, tag or folder
-name as their label. Ids are assigned so every parent comes before its children.
+Their child lists have role `generated` and carry the series, tag, folder or
+sublist name as their label. Ids are assigned so every parent comes before its
+children.
 
-Series and Tags come from book metadata (`calibre:series` /
+Series, Tags and Custom come from book metadata (`calibre:series` /
 `belongs-to-collection`, `dc:subject` / `schema:genre`), so they are empty when
 metadata reading is off.
 
 `header.listOptions` records which lists the build was asked for: bit 0 Recent,
-1 Title, 2 Author (top-level or not), 3 Series, 4 Tags, 5 Folders. An index whose
-options differ from the settings is rebuilt, reusing every book's metadata.
+1 Title, 2 Author (top-level or not), 3 Series, 4 Tags, 5 Folders, 6 Custom. An
+index whose options differ from the settings is rebuilt, reusing every book's
+metadata. `header.customListsHash` (u32 at offset 51) is the FNV-1a hash of the
+custom lists file that build read, never 0, or 0 when the Custom option is off
+or there is no file; an index whose hash differs from the current file's is
+rebuilt the same way.
 
 Lists after the generated ones are written by external tools and have role
 `external`. The reader
 validates the three built-in descriptors on open. It checks each external
 descriptor's bounds when that list is read, and each entry's value as it is read.
-The library screen shows up to four top-level lists as tabs; with more, one tab
-opens a picker of all of them.
+The library screen shows up to four top-level lists as tabs; with more, it opens
+on a picker of all of them.
+
+#### Custom lists file (`.crosspoint/customlists.json`)
+
+Written by the user. Each member is a list: its label, then its sublists, each
+a label and the tag that puts a book in it.
+
+```json
+{
+  "century": ["By century", {
+    "8th Century BCE": "8th Century BCE",
+    "20th Century": "20th Century"
+  }],
+  "genre": ["Genre", {
+    "Read by Nolan": "Read",
+    "Science Fiction": "Science Fiction"
+  }]
+}
+```
+
+Tags match as the Tags lists merge them: case and accents are ignored. Several
+sublists may name one tag, in the same list or different ones. Members of any
+other shape, and sublists whose value is not a string, are skipped; a file that
+is not valid JSON adds no lists and sets `LISTS_INCOMPLETE`. At most 16 lists,
+256 sublists and 8 KiB of labels are read; the rest are left out, also setting
+`LISTS_INCOMPLETE`. The member keys are not used. The file is read as a stream,
+so its size costs no RAM.
 
 ### Records are exactly 128 bytes
 

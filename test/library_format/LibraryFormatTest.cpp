@@ -125,12 +125,13 @@ TEST(LibraryFormat, ExternalListDescriptorsAreBoundedByTheListSection) {
   bad.kind = CLIX_LIST_MIXED + 1;
   EXPECT_FALSE(validateListDesc(h, 3, bad));
   bad = books;
-  bad.role = CLIX_ROLE_GENERATED + 1;
+  bad.role = CLIX_ROLE_CUSTOM + 1;
   EXPECT_FALSE(validateListDesc(h, 3, bad));
 
   // Generated lists take the roles past Author, and a Folders tree is Mixed.
   ClixListDesc generated = books;
-  for (const uint8_t role : {CLIX_ROLE_SERIES, CLIX_ROLE_TAGS, CLIX_ROLE_FOLDERS, CLIX_ROLE_GENERATED}) {
+  for (const uint8_t role :
+       {CLIX_ROLE_SERIES, CLIX_ROLE_TAGS, CLIX_ROLE_FOLDERS, CLIX_ROLE_GENERATED, CLIX_ROLE_CUSTOM}) {
     generated.role = role;
     EXPECT_TRUE(validateListDesc(h, 3, generated)) << static_cast<int>(role);
   }
@@ -337,6 +338,7 @@ TEST(LibraryFormat, ByteImageIsStableAcrossBuilds) {
   EXPECT_EQ(offsetof(ClixHeader, listLen), 44u);
   EXPECT_EQ(offsetof(ClixHeader, listCount), 48u);
   EXPECT_EQ(offsetof(ClixHeader, listOptions), 50u);
+  EXPECT_EQ(offsetof(ClixHeader, customListsHash), 51u);
 
   EXPECT_EQ(offsetof(ClixListDesc, entryCount), 4u);
   EXPECT_EQ(offsetof(ClixListDesc, entriesOff), 8u);

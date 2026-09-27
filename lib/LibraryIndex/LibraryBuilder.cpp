@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstring>
 
+#include "LibraryCustomLists.h"
 #include "LibraryGenerated.h"
 #include "LibraryIndexFile.h"
 #include "LibraryText.h"
@@ -921,6 +922,7 @@ bool emitIndex(const char* folderStagePath, WalkState& st, const uint16_t* order
   // Placeholder only. Degradations are known after the sorts have run.
   header.flags = 0;
   header.listOptions = options;
+  header.customListsHash = gen.customListsHash;
   header.listCount = CLIX_BUILTIN_LISTS;
   // The blob is the LAST section, so its size affects only selfSize — every
   // section offset is already fixed by the counts. Lay out with a placeholder
@@ -1448,6 +1450,10 @@ bool emitIndex(const char* folderStagePath, WalkState& st, const uint16_t* order
 
 const char* libraryIndexPath() { return INDEX_PATH; }
 
+uint32_t libraryCustomListsHash(const uint8_t listOptions) {
+  return (listOptions & CLIX_OPTION_CUSTOM) != 0 ? customListsHash(CUSTOM_LISTS_PATH) : 0;
+}
+
 bool markLibraryIndexDirty() {
   if (Storage.exists(DIRTY_PATH)) return true;
   if (!Storage.exists(CACHE_DIR) && !Storage.mkdir(CACHE_DIR)) {
@@ -1475,6 +1481,7 @@ bool buildLibraryIndex(const char* rootPath, BuildStats& stats, const bool readM
 
   Storage.mkdir(CACHE_DIR);
   if (!recoverInterruptedInstall()) return false;
+  const uint32_t customHash = libraryCustomListsHash(listOptions);
   Storage.remove(STAGE_PATH);
   Storage.remove(GEN_META_PATH);
   Storage.remove(GEN_ENTRIES_PATH);
@@ -1612,10 +1619,11 @@ bool buildLibraryIndex(const char* rootPath, BuildStats& stats, const bool readM
   stats.enriched = st.enriched;
 
   // A previous-format index reuses its books' metadata but is still rewritten,
-  // as is one built with other list options.
+  // as is one built with other list options or another custom lists file.
   if (previous.isOpen() && previous.header().formatVersion == CLIX_FORMAT_VERSION &&
-      previous.header().listOptions == listOptions && st.books == priorCount && st.reused == priorCount &&
-      stats.metadataReused == priorCount && st.unreadableSkipped == 0) {
+      previous.header().listOptions == listOptions && previous.header().customListsHash == customHash &&
+      st.books == priorCount && st.reused == priorCount && stats.metadataReused == priorCount &&
+      st.unreadableSkipped == 0) {
     previous.close();
     Storage.remove(STAGE_PATH);
     Storage.remove(folderStagePath.c_str());
@@ -1816,7 +1824,7 @@ bool buildLibraryIndex(const char* rootPath, BuildStats& stats, const bool readM
   // stages its lists to the card and releases its scratch.
   [[maybe_unused]] const uint32_t generateStartMs = millis();
   GeneratedLists gen;
-  if ((listOptions & (CLIX_OPTION_SERIES | CLIX_OPTION_TAGS | CLIX_OPTION_FOLDERS)) != 0) {
+  if ((listOptions & CLIX_OPTIONS_GENERATED) != 0) {
     HalFile stage;
     HalFile folders;
     bool generated = Storage.openFileForRead("LIBIDX", STAGE_PATH, stage);
@@ -1837,6 +1845,7 @@ bool buildLibraryIndex(const char* rootPath, BuildStats& stats, const bool readM
     }
     stats.listsIncomplete = gen.incomplete;
   }
+  gen.customListsHash = customHash;
   LOG_DBG("LIBIDX", "phase generated lists: %u lists, %ums", static_cast<unsigned>(gen.listCount),
           static_cast<unsigned>(millis() - generateStartMs));
 

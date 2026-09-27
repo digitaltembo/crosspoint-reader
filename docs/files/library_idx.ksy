@@ -86,8 +86,13 @@ types:
       - id: list_options
         type: list_options
         doc: The lists the library settings asked this build for.
+      - id: custom_lists_hash
+        type: u4
+        doc: >
+          FNV-1a of the custom lists file this build read, never 0; 0 when the
+          custom option is off or there is no file.
       - id: reserved
-        size: 13
+        size: 9
 
     types:
       clix_flags:
@@ -124,8 +129,11 @@ types:
             type: b1
           - id: folders
             type: b1
+          - id: custom
+            type: b1
+            doc: Lists from .crosspoint/customlists.json.
           - id: reserved
-            type: b2
+            type: b1
 
   folder_section:
     seq:
@@ -346,6 +354,7 @@ enums:
     5: tags
     6: folders
     7: generated
+    8: custom
   list_icon:
     0: default
     1: list

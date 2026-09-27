@@ -24,11 +24,13 @@ constexpr ListRow LIST_OPTIONS[] = {
     {StrId::STR_LIBRARY_TAB_SERIES, library::CLIX_OPTION_SERIES},
     {StrId::STR_LIBRARY_TAB_TAGS, library::CLIX_OPTION_TAGS},
     {StrId::STR_LIBRARY_LIST_FOLDERS, library::CLIX_OPTION_FOLDERS},
+    {StrId::STR_LIBRARY_LIST_CUSTOM, library::CLIX_OPTION_CUSTOM},
 };
 
 }  // namespace
 
-static_assert(sizeof(LIST_OPTIONS) / sizeof(LIST_OPTIONS[0]) == 6, "one row per list option");
+static_assert(sizeof(LIST_OPTIONS) / sizeof(LIST_OPTIONS[0]) == LibrarySettingsActivity::LIST_ROWS,
+              "one row per list option");
 
 void LibrarySettingsActivity::onEnter() {
   UiListActivity::onEnter();

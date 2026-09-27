@@ -151,9 +151,11 @@ void LibraryListActivity::onEnter() {
   // library settings. Otherwise entering the screen stays instant. This runs
   // before the base onEnter because the index decides how many tabs there are.
   const bool readMetadata = SETTINGS.libraryUseMetadata != 0;
+  const uint8_t listOptions = SETTINGS.libraryLists & library::CLIX_OPTIONS_ALL;
   const bool rebuildNeeded = library::isLibraryIndexDirty() || !index.open(library::libraryIndexPath()) ||
                              index.header().metadataEnabled != readMetadata ||
-                             index.header().listOptions != (SETTINGS.libraryLists & library::CLIX_OPTIONS_ALL);
+                             index.header().listOptions != listOptions ||
+                             index.header().customListsHash != library::libraryCustomListsHash(listOptions);
   if (rebuildNeeded) {
     index.close();
     GUI.drawPopup(renderer, tr(STR_LIBRARY_REBUILDING));

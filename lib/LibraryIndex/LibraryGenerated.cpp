@@ -11,6 +11,7 @@
 #include <cstring>
 #include <string_view>
 
+#include "LibraryCustomLists.h"
 #include "LibraryFormat.h"
 #include "LibraryText.h"
 
@@ -529,6 +530,112 @@ bool generateFolders(GeneratedListSource& source, const uint16_t books, const ui
   return true;
 }
 
+// One Groups list per custom list, of one Books list per non-empty sublist in
+// file order, each in title order. One pass counts every sublist's books and
+// a second fills them, however many custom lists there are.
+bool generateCustom(GeneratedListSource& source, const uint16_t books, Writer& writer, const uint16_t firstId,
+                    const uint16_t budget, bool& incomplete, uint32_t& units) {
+  CustomLists custom;
+  const CustomListsResult loaded = loadCustomLists(CUSTOM_LISTS_PATH, custom);
+  if (loaded == CustomListsResult::Missing) return true;
+  if (loaded != CustomListsResult::Ok) {
+    incomplete = true;
+    return loaded != CustomListsResult::ReadError;
+  }
+  incomplete = incomplete || custom.truncated;
+  const uint16_t slots = custom.subCount;
+  if (slots == 0) return true;
+
+  auto byHash = makeUniqueNoThrow<HashSlot[]>(slots);
+  auto fill = makeUniqueNoThrow<uint32_t[]>(slots + 1u);
+  if (!byHash || !fill) {
+    LOG_ERR("LIBGEN", "OOM: custom list lookup for %u sublists", static_cast<unsigned>(slots));
+    incomplete = true;
+    return true;
+  }
+  for (uint16_t s = 0; s < slots; s++) byHash[s] = HashSlot{custom.subs[s].tagHash, s};
+  std::sort(byHash.get(), byHash.get() + slots,
+            [](const HashSlot& a, const HashSlot& b) { return a.hash != b.hash ? a.hash < b.hash : a.slot < b.slot; });
+  for (uint16_t s = 0; s <= slots; s++) fill[s] = 0;
+
+  // Count, then fill, the sublists each book's tags match. Several sublists may
+  // name one tag; a book matching a sublist twice is listed once.
+  std::string joined;
+  size_t offset = 0;
+  size_t len = 0;
+  constexpr uint8_t MAX_SEEN = 32;
+  const auto visitBook = [&](const uint16_t t, uint16_t* entries) {
+    if (!source.readTags(t, joined)) return false;
+    uint16_t seen[MAX_SEEN];
+    uint8_t seenCount = 0;
+    TagCursor cursor{joined};
+    while (cursor.next(offset, len)) {
+      const uint32_t hash = foldedTagHash(std::string_view(joined).substr(offset, len));
+      const HashSlot* first = byHash.get();
+      const HashSlot* end = first + slots;
+      for (const HashSlot *at =
+               std::lower_bound(first, end, hash, [](const HashSlot& s, const uint32_t h) { return s.hash < h; });
+           at != end && at->hash == hash; ++at) {
+        if (std::find(seen, seen + seenCount, at->slot) != seen + seenCount) continue;
+        if (seenCount < MAX_SEEN) seen[seenCount++] = at->slot;
+        if (entries) {
+          entries[fill[at->slot]++] = t;
+        } else {
+          fill[at->slot + 1]++;
+        }
+      }
+    }
+    return true;
+  };
+  for (uint16_t t = 0; t < books; t++) {
+    service(units);
+    if (!visitBook(t, nullptr)) return false;
+  }
+  for (uint16_t s = 0; s < slots; s++) fill[s + 1] += fill[s];
+  const uint32_t total = fill[slots];
+  std::unique_ptr<uint16_t[]> entries;
+  if (total > 0) {
+    entries = makeUniqueNoThrow<uint16_t[]>(total);
+    if (!entries) {
+      LOG_ERR("LIBGEN", "OOM: %u-byte custom list entries", static_cast<unsigned>(total * sizeof(uint16_t)));
+      incomplete = true;
+      return true;
+    }
+    for (uint16_t t = 0; t < books; t++) {
+      service(units);
+      if (!visitBook(t, entries.get())) return false;
+    }
+  }
+
+  // fill[s] now ends slot s, so slot s spans [s ? fill[s - 1] : 0, fill[s]).
+  const auto begins = [&fill](const uint16_t s) { return s == 0 ? 0u : fill[s - 1]; };
+  uint16_t used = 0;
+  for (uint8_t l = 0; l < custom.listCount; l++) {
+    const CustomLists::List& list = custom.lists[l];
+    uint16_t children = 0;
+    for (uint16_t s = list.firstSub; s < list.firstSub + list.subCount; s++) children += fill[s] > begins(s);
+    if (children == 0) continue;
+    if (used + 1u + children > budget) {
+      LOG_ERR("LIBGEN", "custom lists exceed the list limit");
+      incomplete = true;
+      return true;
+    }
+    const uint16_t id = static_cast<uint16_t>(firstId + used);
+    writer.begin(CLIX_LIST_GROUPS, CLIX_ROLE_CUSTOM, CLIX_LIST_TOP_LEVEL, CLIX_ICON_TAGS);
+    for (uint16_t c = 0; c < children; c++) writer.entry(static_cast<uint16_t>(id + 1 + c));
+    writer.end(custom.label(list.labelOff, list.labelLen));
+    for (uint16_t s = list.firstSub; s < list.firstSub + list.subCount; s++) {
+      if (fill[s] == begins(s)) continue;
+      service(units);
+      writer.begin(CLIX_LIST_BOOKS, CLIX_ROLE_GENERATED, 0, CLIX_ICON_TAG);
+      for (uint32_t k = begins(s); k < fill[s]; k++) writer.entry(entries[k]);
+      writer.end(custom.label(custom.subs[s].labelOff, custom.subs[s].labelLen));
+    }
+    used = static_cast<uint16_t>(used + 1 + children);
+  }
+  return true;
+}
+
 }  // namespace
 
 uint16_t seriesIndexKey(const std::string& index) {
@@ -576,6 +683,10 @@ bool generateLists(GeneratedListSource& source, const uint16_t books, const uint
     if (ok && (options & CLIX_OPTION_FOLDERS)) {
       ok = generateFolders(source, books, folderCount, writer, static_cast<uint16_t>(firstId + writer.lists),
                            remaining(), out.incomplete, units);
+    }
+    if (ok && (options & CLIX_OPTION_CUSTOM)) {
+      ok = generateCustom(source, books, writer, static_cast<uint16_t>(firstId + writer.lists), remaining(),
+                          out.incomplete, units);
     }
     ok = writer.flush() && ok;
     out.listCount = writer.lists;

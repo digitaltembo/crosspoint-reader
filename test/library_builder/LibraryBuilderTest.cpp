@@ -962,11 +962,13 @@ TEST_F(LibraryBuilderTest, GeneratedListsThatCannotBeAllocatedAreLeftOutWithoutF
   fake::add("/Books/c.epub");
   bookMetadata["/a.epub"] = {"Alpha", "A", "", "", "Saga", "1", "Fiction"};
   bookMetadata["/b.epub"] = {"Bravo", "B", "", "", "Saga", "2", "Poetry"};
+  fake::add("/.crosspoint/customlists.json", R"({"genre": ["Genre", {"Verse": "Poetry", "Novels": "Fiction"}]})");
   initial();
   const auto old = fake::files[INDEX]->bytes;
 
   bool leftOut = false;
-  for (int k = 0; k < 96; k++) {
+  int k = 0;
+  for (; k < 256; k++) {
     fake::files[INDEX]->bytes = old;
     fake::failureTriggered = false;
     fake::failAlloc = k;
@@ -988,6 +990,7 @@ TEST_F(LibraryBuilderTest, GeneratedListsThatCannotBeAllocatedAreLeftOutWithoutF
       EXPECT_NE(index.header().flags & CLIX_FLAG_LISTS_INCOMPLETE, 0);
     }
   }
+  EXPECT_LT(k, 256) << "every allocation was failed once";
   EXPECT_TRUE(leftOut);
   EXPECT_FALSE(Storage.exists("/.crosspoint/library.gen"));
   EXPECT_FALSE(Storage.exists("/.crosspoint/library.gen.e"));
@@ -1049,4 +1052,101 @@ TEST_F(LibraryBuilderTest, ExternalListsMoveAfterGeneratedListsWithTheirChildren
   ASSERT_EQ(index.listCount(), 7);
   EXPECT_EQ(listContents(index, 5, &label), std::vector<std::string>{"6"});
   EXPECT_EQ(label, "Mine");
+}
+
+constexpr char CUSTOM_LISTS[] = "/.crosspoint/customlists.json";
+constexpr uint8_t WITH_CUSTOM = CLIX_OPTIONS_DEFAULT | CLIX_OPTION_CUSTOM;
+
+TEST_F(LibraryBuilderTest, CustomListsFollowTheFileAndMatchTagsInAnyCase) {
+  fake::add("/c.epub");
+  bookMetadata["/a.epub"] = {"Alpha", "A", "", "", "", "", "20th Century\nChinese"};
+  bookMetadata["/b.epub"] = {"Bravo", "B", "", "", "", "", "8th century BCE"};
+  bookMetadata["/c.epub"] = {"Charlie", "C", "", "", "", "", "20th Century\nOriginal Language -- Chinese"};
+  fake::add(CUSTOM_LISTS, R"({
+    "century": ["By century", {
+      "8th Century BCE": "8th Century BCE",
+      "5th Century BCE": "5th Century BCE",
+      "20th Century": "20th Century"
+    }],
+    "ignored": {"not": "a list"},
+    "translated": ["Works in “translation”", {
+      "Chinese": "Original Language -- Chinese",
+      "Nationality: Chinese": "chinese",
+      "Skipped": 3
+    }, "extra"]
+  })");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, WITH_CUSTOM));
+  EXPECT_FALSE(stats.listsIncomplete);
+
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  EXPECT_NE(index.header().customListsHash, 0u);
+  // By century 3 with its non-empty sublists 4 and 5, then translated 6 with 7 and 8.
+  ASSERT_EQ(index.listCount(), 9);
+  ClixListDesc century{};
+  ASSERT_TRUE(index.readList(3, century));
+  EXPECT_EQ(century.role, CLIX_ROLE_CUSTOM);
+  EXPECT_EQ(century.icon, CLIX_ICON_TAGS);
+  EXPECT_NE(century.flags & CLIX_LIST_TOP_LEVEL, 0);
+  std::string label;
+  EXPECT_EQ(listContents(index, 3, &label), (std::vector<std::string>{"4", "5"})) << "the empty sublist is left out";
+  EXPECT_EQ(label, "By century");
+  EXPECT_EQ(listContents(index, 4, &label), std::vector<std::string>{"/b.epub"});
+  EXPECT_EQ(label, "8th Century BCE") << "file order, not alphabetical";
+  EXPECT_EQ(listContents(index, 5, &label), (std::vector<std::string>{"/a.epub", "/c.epub"}));
+  EXPECT_EQ(label, "20th Century");
+  EXPECT_EQ(listContents(index, 6, &label), (std::vector<std::string>{"7", "8"}));
+  EXPECT_EQ(label, "Works in \xE2\x80\x9Ctranslation\xE2\x80\x9D");
+  EXPECT_EQ(listContents(index, 7, &label), std::vector<std::string>{"/c.epub"});
+  EXPECT_EQ(label, "Chinese");
+  EXPECT_EQ(listContents(index, 8, &label), std::vector<std::string>{"/a.epub"});
+  EXPECT_EQ(label, "Nationality: Chinese");
+}
+
+TEST_F(LibraryBuilderTest, AMissingOrMalformedCustomListsFileAddsNoLists) {
+  bookMetadata["/a.epub"] = {"Alpha", "A", "", "", "", "", "Poetry"};
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, WITH_CUSTOM));
+  EXPECT_FALSE(stats.listsIncomplete) << "no file is not a failure";
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  EXPECT_EQ(index.listCount(), CLIX_BUILTIN_LISTS);
+  EXPECT_EQ(index.header().customListsHash, 0u);
+  index.close();
+
+  fake::add(CUSTOM_LISTS, R"({"genre": ["Genre", {"Poetry": "Poetry"})");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, WITH_CUSTOM));
+  EXPECT_TRUE(stats.listsIncomplete);
+  ASSERT_TRUE(index.open(INDEX));
+  EXPECT_EQ(index.listCount(), CLIX_BUILTIN_LISTS);
+  EXPECT_NE(index.header().flags & CLIX_FLAG_LISTS_INCOMPLETE, 0);
+}
+
+TEST_F(LibraryBuilderTest, EditingTheCustomListsFileRebuildsTheIndex) {
+  bookMetadata["/a.epub"] = {"Alpha", "A", "", "", "", "", "Poetry"};
+  bookMetadata["/b.epub"] = {"Bravo", "B", "", "", "", "", "Drama"};
+  fake::add(CUSTOM_LISTS, R"({"genre": ["Genre", {"Verse": "poetry"}]})");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, WITH_CUSTOM));
+  const auto built = fake::files[INDEX]->bytes;
+  EXPECT_EQ(libraryCustomListsHash(WITH_CUSTOM), [&] {
+    LibraryIndexFile index;
+    EXPECT_TRUE(index.open(INDEX));
+    return index.header().customListsHash;
+  }());
+  EXPECT_EQ(libraryCustomListsHash(CLIX_OPTIONS_DEFAULT), 0u) << "no fingerprint without the option";
+
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, WITH_CUSTOM));
+  EXPECT_FALSE(stats.indexReplaced) << "same books, options and file";
+  EXPECT_EQ(fake::files[INDEX]->bytes, built);
+
+  fake::add(CUSTOM_LISTS, R"({"genre": ["Genre", {"Verse": "poetry", "Plays": "Drama"}]})");
+  fake::parses = 0;
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true, WITH_CUSTOM));
+  EXPECT_TRUE(stats.indexReplaced);
+  EXPECT_EQ(fake::parses, 0u);
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  std::string label;
+  EXPECT_EQ(listContents(index, 3, &label), (std::vector<std::string>{"4", "5"}));
+  EXPECT_EQ(listContents(index, 5, &label), std::vector<std::string>{"/b.epub"});
+  EXPECT_EQ(label, "Plays");
 }

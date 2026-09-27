@@ -78,9 +78,12 @@ enum ClixListOption : uint8_t {
   CLIX_OPTION_SERIES = 1 << 3,
   CLIX_OPTION_TAGS = 1 << 4,
   CLIX_OPTION_FOLDERS = 1 << 5,
+  CLIX_OPTION_CUSTOM = 1 << 6,  // the lists described by the custom lists file
 };
 inline constexpr uint8_t CLIX_OPTIONS_DEFAULT = CLIX_OPTION_RECENT | CLIX_OPTION_TITLE | CLIX_OPTION_AUTHOR;
-inline constexpr uint8_t CLIX_OPTIONS_ALL = 0x3F;
+inline constexpr uint8_t CLIX_OPTIONS_ALL = 0x7F;
+inline constexpr uint8_t CLIX_OPTIONS_GENERATED =
+    CLIX_OPTION_SERIES | CLIX_OPTION_TAGS | CLIX_OPTION_FOLDERS | CLIX_OPTION_CUSTOM;
 
 // Complete-path fingerprint stored in front of every record's name blob.
 // Shared by the builder's reconciliation and the browser's recent-book lookup,
@@ -121,7 +124,8 @@ enum ClixListRole : uint8_t {
   CLIX_ROLE_SERIES = 4,     // Groups of per-series lists
   CLIX_ROLE_TAGS = 5,       // Groups of per-tag lists
   CLIX_ROLE_FOLDERS = 6,    // Mixed: the card's root folder
-  CLIX_ROLE_GENERATED = 7,  // a child of one of the three above; labelled
+  CLIX_ROLE_GENERATED = 7,  // a child of a generated list; labelled
+  CLIX_ROLE_CUSTOM = 8,     // Groups of per-tag lists from the custom lists file; labelled
 };
 
 // The icon shown beside a list's row. DEFAULT, and any value this firmware does
@@ -179,7 +183,10 @@ struct ClixHeader {
   uint32_t listLen;
   uint16_t listCount;
   uint8_t listOptions;  // ClixListOption bits this build was asked for
-  uint8_t reserved[13];
+  // Fingerprint of the custom lists file the build read (0: none, or the
+  // Custom option off), so an edited file triggers a rebuild.
+  uint32_t customListsHash;
+  uint8_t reserved[9];
 };
 static_assert(sizeof(ClixHeader) == 64, "ClixHeader must be exactly 64 bytes");
 
@@ -276,6 +283,7 @@ inline ClixListIcon listIcon(const ClixListDesc& list) {
     case CLIX_ROLE_SERIES:
       return CLIX_ICON_SERIES;
     case CLIX_ROLE_TAGS:
+    case CLIX_ROLE_CUSTOM:
       return CLIX_ICON_TAGS;
     case CLIX_ROLE_FOLDERS:
       return CLIX_ICON_FOLDER_TREE;
@@ -349,7 +357,7 @@ inline ClixValidity validateHeaderStructure(const ClixHeader& h, const uint64_t 
 // Validate list `id`'s descriptor against a header that passed
 // validateHeaderStructure. Entry VALUES are checked as they are read.
 inline bool validateListDesc(const ClixHeader& h, const uint16_t id, const ClixListDesc& d) {
-  if (id >= h.listCount || d.kind > CLIX_LIST_MIXED || d.role > CLIX_ROLE_GENERATED) return false;
+  if (id >= h.listCount || d.kind > CLIX_LIST_MIXED || d.role > CLIX_ROLE_CUSTOM) return false;
   if (d.labelLen > 0 && (d.labelOff > h.listLen || d.labelLen > h.listLen - d.labelOff)) return false;
   if (d.kind == CLIX_LIST_IDENTITY) {
     if (d.entryCount != h.bookCount) return false;

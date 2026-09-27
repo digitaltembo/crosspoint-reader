@@ -19,9 +19,10 @@ class LibrarySettingsActivity final : public UiListActivity {
   void onEnter() override;
   void onExit() override;
 
- private:
   // Row 0 is "Use book metadata"; the rest are one list option each.
-  static constexpr int LIST_ROWS = 6;
+  static constexpr int LIST_ROWS = 7;
+
+ private:
   static constexpr int ROW_COUNT = 1 + LIST_ROWS;
 
   int listCount() const override { return ROW_COUNT; }
