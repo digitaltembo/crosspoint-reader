@@ -43,7 +43,7 @@ types:
       - id: format_version
         contents: [2]
       - id: fold_version
-        contents: [3]
+        contents: [5]
       - id: flags
         type: clix_flags
       - id: metadata_enabled
@@ -186,6 +186,13 @@ types:
           - id: author
             type: str
             size: author_len
+            encoding: UTF-8
+          - id: author_sort_len
+            type: u1
+          - id: author_sort
+            doc: The book's primary-author file-as, empty if absent
+            type: str
+            size: author_sort_len
             encoding: UTF-8
 
   permutation_section:
