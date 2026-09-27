@@ -1,0 +1,17 @@
+# Icons for library lists (ClixListIcon), beyond the folder, book, library and
+# bookmark icons listIcons.h already has. Regenerate from the repository root with:
+#   python3 freeink-sdk/libs/assets/Icons/tools/gen_icons.py \
+#     --manifest src/components/icons/libraryListIcons.manifest \
+#     --svgdir freeink-sdk/libs/assets/Icons/lucide/icons \
+#     --sizes 32 --out src/components/icons/libraryListIcons.h
+history = history
+arrow-down-a-z = arrow-down-a-z
+user = user
+library-big = library-big
+book-copy = book-copy
+tags = tags
+tag = tag
+folder-tree = folder-tree
+list = list
+star = star
+heart = heart

@@ -110,6 +110,8 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   if (keyboardLayouts != 0) {
     doc["keyboardLayouts"] = keyboardLayouts;
   }
+  // A bit mask, edited only on the Library settings screen.
+  doc["libraryLists"] = libraryLists;
 }
 
 bool CrossPointSettings::fromJson(JsonVariantConst doc) {
@@ -257,6 +259,11 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   // Absent means unconfigured, which is the default.
   if (doc["keyboardLayouts"].is<uint16_t>()) {
     keyboardLayouts = doc["keyboardLayouts"].as<uint16_t>();
+  }
+  // At least one list stays shown; anything else falls back to the default.
+  if (doc["libraryLists"].is<uint8_t>()) {
+    const uint8_t lists = doc["libraryLists"].as<uint8_t>() & 0x3F;
+    libraryLists = lists != 0 ? lists : 0x07;
   }
 
   if (needsResave) {

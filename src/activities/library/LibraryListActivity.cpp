@@ -23,6 +23,7 @@
 #include "components/UIScale.h"
 #include "components/UITheme.h"
 #include "components/icons/headerIcons.h"
+#include "components/icons/libraryListIcons.h"
 #include "components/icons/listIcons.h"
 #include "components/icons/search32.h"
 #include "fontIds.h"
@@ -67,11 +68,63 @@ constexpr library::SortOrder orderForList(const uint16_t id, const uint8_t desce
   return descending ? library::SortOrder::RecentDesc : library::SortOrder::RecentAsc;
 }
 
-const char* builtinLabel(const uint16_t id) {
-  if (id == library::CLIX_TITLE_LIST) return tr(STR_LIBRARY_TAB_TITLE);
-  if (id == library::CLIX_AUTHOR_LIST) return tr(STR_LIBRARY_TAB_AUTHOR);
-  return tr(STR_LIBRARY_TAB_RECENT);
+// Lists the firmware names: the built-in ones and the generated top-level
+// ones. Every other list carries its own label.
+const char* fixedLabel(const uint8_t role) {
+  switch (role) {
+    case library::CLIX_ROLE_RECENT:
+      return tr(STR_LIBRARY_TAB_RECENT);
+    case library::CLIX_ROLE_TITLE:
+      return tr(STR_LIBRARY_TAB_TITLE);
+    case library::CLIX_ROLE_AUTHOR:
+      return tr(STR_LIBRARY_TAB_AUTHOR);
+    case library::CLIX_ROLE_SERIES:
+      return tr(STR_LIBRARY_TAB_SERIES);
+    case library::CLIX_ROLE_TAGS:
+      return tr(STR_LIBRARY_TAB_TAGS);
+    case library::CLIX_ROLE_FOLDERS:
+      return tr(STR_LIBRARY_TAB_FOLDERS);
+    default:
+      return nullptr;
+  }
 }
+
+fui::BitmapRef listIconBitmap(const library::ClixListIcon icon) {
+  switch (icon) {
+    case library::CLIX_ICON_FOLDER:
+      return fui::bitmapFromIcon(icon_folder_32);
+    case library::CLIX_ICON_FOLDER_TREE:
+      return fui::bitmapFromIcon(icon_folder_tree_32);
+    case library::CLIX_ICON_BOOK:
+      return fui::bitmapFromIcon(icon_book_32);
+    case library::CLIX_ICON_BOOKS:
+      return fui::bitmapFromIcon(icon_library_32);
+    case library::CLIX_ICON_RECENT:
+      return fui::bitmapFromIcon(icon_history_32);
+    case library::CLIX_ICON_TITLE:
+      return fui::bitmapFromIcon(icon_arrow_down_a_z_32);
+    case library::CLIX_ICON_AUTHOR:
+      return fui::bitmapFromIcon(icon_user_32);
+    case library::CLIX_ICON_SERIES:
+      return fui::bitmapFromIcon(icon_library_big_32);
+    case library::CLIX_ICON_SERIES_ENTRY:
+      return fui::bitmapFromIcon(icon_book_copy_32);
+    case library::CLIX_ICON_TAGS:
+      return fui::bitmapFromIcon(icon_tags_32);
+    case library::CLIX_ICON_TAG:
+      return fui::bitmapFromIcon(icon_tag_32);
+    case library::CLIX_ICON_BOOKMARK:
+      return fui::bitmapFromIcon(icon_bookmark_32);
+    case library::CLIX_ICON_STAR:
+      return fui::bitmapFromIcon(icon_star_32);
+    case library::CLIX_ICON_HEART:
+      return fui::bitmapFromIcon(icon_heart_32);
+    default:
+      return fui::bitmapFromIcon(icon_list_32);
+  }
+}
+
+const char* builtinLabel(const uint16_t id) { return fixedLabel(static_cast<uint8_t>(id + 1)); }
 
 }  // namespace
 
@@ -94,12 +147,13 @@ void LibraryListActivity::onEnter() {
   // its persistence write never overlaps the long-lived index reader.
   if (RECENT_BOOKS.pruneMissing()) RECENT_BOOKS.saveToFile();
 
-  // Rebuild when the index is missing, invalid, or was built with the other
-  // metadata mode. Otherwise entering the screen stays instant. This runs
+  // Rebuild when the index is missing, invalid, or was built with other
+  // library settings. Otherwise entering the screen stays instant. This runs
   // before the base onEnter because the index decides how many tabs there are.
   const bool readMetadata = SETTINGS.libraryUseMetadata != 0;
   const bool rebuildNeeded = library::isLibraryIndexDirty() || !index.open(library::libraryIndexPath()) ||
-                             index.header().metadataEnabled != readMetadata;
+                             index.header().metadataEnabled != readMetadata ||
+                             index.header().listOptions != (SETTINGS.libraryLists & library::CLIX_OPTIONS_ALL);
   if (rebuildNeeded) {
     index.close();
     GUI.drawPopup(renderer, tr(STR_LIBRARY_REBUILDING));
@@ -118,6 +172,8 @@ void LibraryListActivity::onEnter() {
     LOG_ERR("LIB", "index was built without duplicate detection");
   }
   resolvePinned();
+  // Selects the last list's row, now that the base has reset the navigation.
+  if (pickerOpen) openPicker();
 
   // Entered while Confirm was still held (typical when launched from the home
   // menu): ignore its release, or we would open whatever sits at row 0.
@@ -151,11 +207,11 @@ void LibraryListActivity::loadTopLists() {
   }
   for (uint16_t id = 0; id < total; id++) {
     library::ClixListDesc list{};
-    if (id < library::CLIX_BUILTIN_LISTS ||
-        (index.readList(id, list) && (list.flags & library::CLIX_LIST_TOP_LEVEL) != 0)) {
-      topLists[topCount++] = id;
-    }
+    if (index.readList(id, list) && (list.flags & library::CLIX_LIST_TOP_LEVEL) != 0) topLists[topCount++] = id;
   }
+  // The settings keep one list shown; an index that hides every list still
+  // shows Title.
+  if (topCount == 0) topLists[topCount++] = library::CLIX_TITLE_LIST;
   pickerMode = topCount > MAX_LIST_TABS;
   pickerOpen = pickerMode;
   activeTabIndex = 0;
@@ -164,26 +220,31 @@ void LibraryListActivity::loadTopLists() {
       tabLabels[i].clear();
       library::ClixListDesc list{};
       if (topLists[i] >= library::CLIX_BUILTIN_LISTS && index.readList(topLists[i], list)) {
-        index.readListLabel(list, tabLabels[i]);
+        listLabel(list, tabLabels[i]);
       }
     }
     openList(topLists[0], false);
     return;
   }
 
-  // Reopen the list chosen last time when it is still the same list.
-  openList(library::CLIX_RECENT_LIST, false);
+  // The picker opens on the list chosen last time when it is still the same
+  // list.
+  openList(topLists[0], false);
   const uint16_t saved = APP_STATE.libraryListId;
   for (uint16_t i = 0; i < topCount; i++) {
     if (topLists[i] != saved) continue;
     openList(saved, false);
-    if (labelHash(currentLabel) == APP_STATE.libraryListLabelHash) {
-      pickerOpen = false;
-      topLabel = currentLabel;
-    } else {
-      openList(library::CLIX_RECENT_LIST, false);
-    }
+    if (labelHash(currentLabel) != APP_STATE.libraryListLabelHash) openList(topLists[0], false);
     break;
+  }
+}
+
+void LibraryListActivity::listLabel(const library::ClixListDesc& list, std::string& out) {
+  const char* fixed = fixedLabel(list.role);
+  if (fixed) {
+    out = fixed;
+  } else if (!index.readListLabel(list, out) || out.empty()) {
+    out = tr(STR_LIBRARY_UNKNOWN_TITLE);
   }
 }
 
@@ -199,8 +260,8 @@ void LibraryListActivity::openList(const uint16_t id, const bool descending) {
   if (builtinView()) {
     currentLabel = builtinLabel(id);
     sortOrder = orderForList(id, descendingBuiltins);
-  } else if (!index.readListLabel(currentDesc, currentLabel) || currentLabel.empty()) {
-    currentLabel = tr(STR_LIBRARY_UNKNOWN_TITLE);
+  } else {
+    listLabel(currentDesc, currentLabel);
   }
 }
 
@@ -224,7 +285,6 @@ void LibraryListActivity::chooseTopList(const int entry) {
   pickerOpen = false;
   depth = 0;
   openList(id, false);
-  topLabel = currentLabel;
   const uint32_t hash = labelHash(currentLabel);
   if (APP_STATE.libraryListId != id || APP_STATE.libraryListLabelHash != hash) {
     APP_STATE.libraryListId = id;
@@ -265,28 +325,42 @@ void LibraryListActivity::popList() {
 uint16_t LibraryListActivity::listIdAt(const int entry) {
   if (entry < 0) return NO_LIST;
   if (pickerView()) return entry < topCount ? topListAt(entry) : NO_LIST;
-  return index.entryAt(currentList, currentDesc, static_cast<uint16_t>(entry), currentDescending);
+  const uint16_t value = index.entryAt(currentList, currentDesc, static_cast<uint16_t>(entry), currentDescending);
+  if (currentDesc.kind != library::CLIX_LIST_MIXED) return value;
+  return value != NO_LIST && (value & library::CLIX_ENTRY_LIST_BIT) != 0
+             ? static_cast<uint16_t>(value & ~library::CLIX_ENTRY_LIST_BIT)
+             : NO_LIST;
 }
 
-uint8_t LibraryListActivity::listRowText(const uint16_t id, std::string& label, std::string& subtitle) {
+bool LibraryListActivity::rowIsList(const int entry) {
+  if (listRowsView()) return true;
+  if (!mixedView() || entry < 0) return false;
+  const uint16_t value = index.entryAt(currentList, currentDesc, static_cast<uint16_t>(entry), currentDescending);
+  return value != NO_LIST && (value & library::CLIX_ENTRY_LIST_BIT) != 0;
+}
+
+bool LibraryListActivity::mixedView() const {
+  return !pickerOpen && query.empty() && !builtinView() && currentDesc.kind == library::CLIX_LIST_MIXED;
+}
+
+library::ClixListIcon LibraryListActivity::listRowText(const uint16_t id, std::string& label, std::string& subtitle) {
   label.clear();
   subtitle.clear();
   library::ClixListDesc list{};
   if (id == NO_LIST || !index.readList(id, list)) {
     label = tr(STR_LIBRARY_UNKNOWN_TITLE);
-    return library::CLIX_LIST_BOOKS;
+    return library::CLIX_ICON_LIST;
   }
-  if (id < library::CLIX_BUILTIN_LISTS) {
-    label = builtinLabel(id);
-  } else if (!index.readListLabel(list, label) || label.empty()) {
-    label = tr(STR_LIBRARY_UNKNOWN_TITLE);
+  listLabel(list, label);
+  // A folder's size mixes subfolders and books, so it is left unsaid.
+  if (list.kind != library::CLIX_LIST_MIXED) {
+    char count[32];
+    snprintf(count, sizeof(count),
+             list.kind == library::CLIX_LIST_GROUPS ? tr(STR_LIBRARY_LIST_COUNT) : tr(STR_LIBRARY_BOOK_COUNT),
+             static_cast<int>(list.entryCount));
+    subtitle = count;
   }
-  char count[32];
-  snprintf(count, sizeof(count),
-           list.kind == library::CLIX_LIST_GROUPS ? tr(STR_LIBRARY_LIST_COUNT) : tr(STR_LIBRARY_BOOK_COUNT),
-           static_cast<int>(list.entryCount));
-  subtitle = count;
-  return list.kind;
+  return library::listIcon(list);
 }
 
 bool LibraryListActivity::groupsView() const {
@@ -307,12 +381,17 @@ uint16_t LibraryListActivity::ordinalAt(const int entry) {
   const uint16_t row = static_cast<uint16_t>(rowFor(entry));
   if (!query.empty() || (!pickerOpen && builtinView())) return index.ordinalForRow(lookupOrder(), row);
   if (pickerOpen || currentDesc.kind == library::CLIX_LIST_GROUPS) return NO_LIST;
-  return index.entryAt(currentList, currentDesc, row, currentDescending);
+  const uint16_t value = index.entryAt(currentList, currentDesc, row, currentDescending);
+  // A Mixed list's list entries are not books.
+  if (currentDesc.kind == library::CLIX_LIST_MIXED && value != NO_LIST && (value & library::CLIX_ENTRY_LIST_BIT) != 0) {
+    return NO_LIST;
+  }
+  return value;
 }
 
 bool LibraryListActivity::rebuildIndex() {
   library::BuildStats stats;
-  const bool ok = library::buildLibraryIndex("/", stats, SETTINGS.libraryUseMetadata != 0);
+  const bool ok = library::buildLibraryIndex("/", stats, SETTINGS.libraryUseMetadata != 0, SETTINGS.libraryLists);
   if (!ok) {
     LOG_ERR("LIB", "index build failed");
     return false;
@@ -419,7 +498,7 @@ void LibraryListActivity::activateIndex(const int index) {
     chooseTopList(index);
   } else if (groupsCollapsed) {
     expandGroup(index);
-  } else if (groupsView()) {
+  } else if (rowIsList(index)) {
     const uint16_t child = listIdAt(index);
     if (child != NO_LIST) pushList(child);
   } else {
@@ -436,7 +515,7 @@ bool LibraryListActivity::deleteEligible() const {
 }
 
 void LibraryListActivity::onRowLongPress(const int index) {
-  if (listRowsView()) {
+  if (rowIsList(index)) {
     activateIndex(index);
   } else if (recentView()) {
     showRecentBookOptions(index);
@@ -532,7 +611,7 @@ void LibraryListActivity::resetAfterRebuild() {
   } else {
     depth = 0;
     pickerOpen = pickerMode;
-    openList(library::CLIX_RECENT_LIST, false);
+    openList(topListAt(0), false);
   }
   // Sort positions, group starts, and pinned rows all point into the old order.
   applyFilter();
@@ -670,8 +749,9 @@ void LibraryListActivity::stepTab(const int direction) {
 
 void LibraryListActivity::onTabAction(const int index) {
   app.clearTapFlash();
+  // In picker mode the only "tab" is the header title.
   if (pickerMode) {
-    if (!pickerOpen) openPicker();
+    toggleSortDirection();
     return;
   }
   selectTab(index, true);
@@ -711,7 +791,7 @@ void LibraryListActivity::toggleSortDirection() {
     selectTab(activeTab(), true);
     return;
   }
-  if (pickerOpen) return;
+  if (!sortTitleActive()) return;
   if (builtinView()) {
     descendingBuiltins ^= static_cast<uint8_t>(1u << currentList);
     sortOrder = orderForList(currentList, descendingBuiltins);
@@ -731,7 +811,8 @@ int LibraryListActivity::tabCount() const { return pickerMode ? 1 : topCount; }
 int LibraryListActivity::activeTab() const { return pickerMode ? 0 : activeTabIndex; }
 
 const char* LibraryListActivity::tabLabel(const int index) const {
-  if (pickerMode) return pickerOpen ? tr(STR_LIBRARY_LISTS) : topLabel.c_str();
+  // Picker mode draws no strip; its title is buildTitleControl's.
+  if (pickerMode) return titleText.c_str();
   const uint16_t id = topListAt(index);
   return id < library::CLIX_BUILTIN_LISTS ? builtinLabel(id) : tabLabels[index].c_str();
 }
@@ -889,7 +970,7 @@ void LibraryListActivity::applyFilter() {
 
 // Staged back-out, shared by the Back button and the header's back arrow:
 // clear the search, expand collapsed groups, leave a child list, return to the
-// list picker, return focus to the tabs, then leave for home.
+// list picker (or return focus to the tabs), then leave for home.
 void LibraryListActivity::handleBackAction() {
   auto& nav = activeNav();
   if (!query.empty()) {
@@ -904,7 +985,7 @@ void LibraryListActivity::handleBackAction() {
     popList();
   } else if (pickerMode && !pickerOpen) {
     openPicker();
-  } else if (!tabsFocused() && !degraded) {
+  } else if (!pickerMode && !tabsFocused() && !degraded) {
     // Keep the current list and viewport while returning focus to the tabs.
     nav.selected = 0;
     requestUpdate();
@@ -983,8 +1064,8 @@ bool LibraryListActivity::handleButtons() {
   if (mappedInput.wasLongPressed(MappedInputManager::Button::Confirm, LONG_PRESS_MS)) {
     if (tabsFocused()) {
       if (!degraded) toggleSortDirection();
-    } else if (listRowsView()) {
-      if (count > 0) activateIndex(selectedEntry());
+    } else if (count > 0 && rowIsList(selectedEntry())) {
+      activateIndex(selectedEntry());
     } else if (recentView()) {
       showRecentBookOptions(selectedEntry());
     } else if (deleteEligible()) {
@@ -1005,7 +1086,7 @@ bool LibraryListActivity::handleButtons() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (tabsFocused()) {
       if (pickerMode) {
-        if (!pickerOpen) openPicker();
+        toggleSortDirection();
       } else {
         stepTab(1);
       }
@@ -1096,11 +1177,12 @@ void LibraryListActivity::buildRows(UiScreen& screen) {
       } else {
         formatInitialHeading(titleInitialFor(bookEntry), title);
       }
-    } else if (listRows) {
+    } else if (listRows || rowIsList(entry)) {
       // A list row: the list's name over its size.
-      const uint8_t kind = listRowText(listIdAt(entry), title, author);
-      item.subtitle = author.c_str();
-      item.icon = listIconFor(kind == library::CLIX_LIST_GROUPS ? UIIcon::Folder : UIIcon::Library, 32);
+      const library::ClixListIcon icon = listRowText(listIdAt(entry), title, author);
+      if (!author.empty()) item.subtitle = author.c_str();
+      item.icon = listIconBitmap(icon);
+      rowFile.clear();
     } else {
       if (!rowTextFor(entry, title, author, &rowFile)) continue;
       uint32_t initial = 0;
@@ -1201,10 +1283,75 @@ void LibraryListActivity::buildHeader(UiScreen& screen) {
   }
   const auto frameRect = screen.frame().screen();
   // Header and tabs share a screen-relative boundary, independent of bezel insets.
-  fui::header(screen.frame(),
-              fui::Rect{frameRect.x, static_cast<int16_t>(metrics.topPadding), frameRect.width,
-                        static_cast<int16_t>(metrics.headerHeight)},
-              header);
+  const fui::Rect band{frameRect.x, static_cast<int16_t>(metrics.topPadding), frameRect.width,
+                       static_cast<int16_t>(metrics.headerHeight)};
+  const bool titleControl = pickerMode && !degraded && query.empty();
+  if (titleControl) header.title = nullptr;
+  fui::header(screen.frame(), band, header);
+  if (titleControl) buildTitleControl(screen, band, header);
+}
+
+// Picker mode has no tab strip: the header title names the open list, with
+// its direction, and takes the strip's place as ring 0. It is drawn as a
+// one-tab bar so it gets the tab's arrow, tap target and focus pill.
+void LibraryListActivity::buildTitleControl(UiScreen& screen, const fui::Rect& band, const fui::HeaderProps& header) {
+  const auto& theme = screen.theme();
+  if (pickerOpen) {
+    titleText = tr(STR_LIBRARY);
+  } else if (depth > 0) {
+    titleText = currentLabel;
+  } else {
+    char buf[160];
+    snprintf(buf, sizeof(buf), tr(STR_LIBRARY_LIST_TITLE), currentLabel.c_str());
+    titleText = buf;
+  }
+
+  fui::TabItem tab;
+  tab.label = titleText.c_str();
+  tab.selected = true;
+  if (sortTitleActive()) tab.indicator = viewDescending() ? fui::TabIndicator::Down : fui::TabIndicator::Up;
+
+  fui::TabBarProps props;
+  props.tabs = &tab;
+  props.count = 1;
+  props.action = ACTION_TAB;
+  props.inputMask = fui::InputTouch;
+  props.text = theme.titleText;
+  props.tabInset = fui::Insets{0, 0, 0, 0};
+  props.contentInset = fui::Insets{2, 10, 2, 10};
+  props.indicatorSize = 10;
+  props.indicatorGap = 8;
+  props.minTouchSize = theme.minTouchSize;
+  fui::StyleSet styles;
+  styles.explicitlySet = true;
+  styles.normal.foreground = fui::Paint::solid(fui::Color::Black);
+  styles.selected.foreground = fui::Paint::solid(fui::Color::Black);
+  if (tabsFocused()) {
+    // Button boards reach the title on the ring; show where focus is.
+    styles.selected.background = fui::Paint::solid(fui::Color::Black);
+    styles.selected.foreground = fui::Paint::solid(fui::Color::White);
+    styles.selected.radius = theme.listRowRadius;
+  }
+  styles.focused = styles.selected;
+  styles.active = styles.selected;
+  props.tabStyles = styles;
+
+  // The space between the header's buttons, laid out as fui::header lays out
+  // its title: tucked after the back arrow, or centered on the band.
+  const bool touch = mappedInput.hasTouch();
+  const int16_t leading = touch ? static_cast<int16_t>(4 + (header.leadingSize + header.leadingIcon.width) / 2 + 6)
+                                : static_cast<int16_t>(header.sidePadding);
+  int16_t trailing = static_cast<int16_t>(12 + header.trailingSize + 8);
+  if (touch) trailing = static_cast<int16_t>(trailing + 4 + header.trailingSize);
+  const bool centered = theme.headerTitleAlign == fui::TextAlign::Center;
+  const int16_t left = centered ? std::max(leading, trailing) : leading;
+  const int16_t right = centered ? left : trailing;
+  const int16_t height = static_cast<int16_t>(screen.target().lineHeight(props.text.font) + 12);
+  const fui::Rect rect{static_cast<int16_t>(band.x + left),
+                       static_cast<int16_t>(band.y + header.titleOffsetY + (band.height - height) / 2),
+                       static_cast<int16_t>(band.width - left - right), height};
+  if (!centered) props.layout = fui::TabBarLayout::ContentWidth;
+  fui::tabBar(screen.frame(), rect, props);
 }
 
 void LibraryListActivity::buildScreen(UiScreen& screen) {
@@ -1216,7 +1363,11 @@ void LibraryListActivity::buildScreen(UiScreen& screen) {
   screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(metrics.topPadding + metrics.headerHeight), 0,
                                                 static_cast<int16_t>(metrics.buttonHintsHeight + readoutReserved), 0});
 
-  if (!degraded) buildTabBar(screen);
+  if (pickerMode) {
+    screen.spacer(static_cast<int16_t>(metrics.verticalSpacing));
+  } else if (!degraded) {
+    buildTabBar(screen);
+  }
   if (bookRowCount() == 0) {
     const char* message = tr(STR_LIBRARY_NO_RESULTS);
     if (filterFailed) {
@@ -1262,7 +1413,7 @@ void LibraryListActivity::drawHoldHelp() const {
   if (mappedInput.hasTouch() || groupsCollapsed || listRowsView()) return;
   const char* help = nullptr;
   if (tabsFocused() && !degraded)
-    help = pickerOpen ? nullptr : tr(STR_LIBRARY_HOLD_SORT);
+    help = pickerMode ? nullptr : tr(STR_LIBRARY_HOLD_SORT);
   else if (!tabsFocused() && recentView() && listCount() > 0)
     help = tr(STR_LIBRARY_HOLD_OPTIONS);  // recent rows: hold opens the row menu
   else if (!tabsFocused() && deleteEligible() && listCount() > 0)
@@ -1289,12 +1440,13 @@ void LibraryListActivity::drawFooter() {
   drawHoldHelp();
 
   const bool backGoesHome =
-      tabsFocused() && !groupsCollapsed && query.empty() && depth == 0 && (!pickerMode || pickerOpen);
+      !groupsCollapsed && query.empty() && depth == 0 && (pickerMode ? pickerOpen : tabsFocused());
   const char* backLabel = backGoesHome ? tr(STR_HOME) : tr(STR_BACK);
   const char* confirmLabel = groupsCollapsed || listRowsView() ? tr(STR_SELECT) : tr(STR_OPEN);
   const bool canSearch = tabsFocused() && !degraded;
-  // The picker's single tab opens the picker rather than stepping tabs.
-  const char* tabConfirm = pickerMode ? tr(STR_SELECT) : tr(STR_TOGGLE);
+  // Confirm on the tabs steps them; on the title it reverses the list. The
+  // picker's title does nothing.
+  const char* tabConfirm = pickerMode ? (sortTitleActive() ? tr(STR_TOGGLE) : "") : tr(STR_TOGGLE);
   const auto labels = mappedInput.mapLabels(backLabel, tabsFocused() ? tabConfirm : confirmLabel,
                                             canSearch ? tr(STR_SEARCH) : tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

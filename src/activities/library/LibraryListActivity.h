@@ -17,8 +17,9 @@
 // on top, so active reads and fresh arrivals share one list.
 //
 // The index may also carry lists written by an external tool. Up to
-// MAX_LIST_TABS top-level lists show as tabs; with more, a single tab opens a
-// picker of all of them. A Groups list's rows open child lists, to any depth
+// MAX_LIST_TABS top-level lists show as tabs. With more, the screen opens on a
+// picker of all of them, and the chosen list is named by the header title,
+// which reverses it. A Groups list's rows open child lists, to any depth
 // the index describes (MAX_LIST_DEPTH on screen); Back returns one level.
 // Search always covers the whole library.
 //
@@ -112,10 +113,19 @@ class LibraryListActivity final : public UiTabListActivity {
   uint16_t listIdAt(int entry);
   // Top-level list `i`; the built-in ids by position when the table is absent.
   uint16_t topListAt(int i) const { return topLists ? topLists[i] : static_cast<uint16_t>(i); }
-  // Label and "N books" subtitle for a list row; returns the list's kind.
-  uint8_t listRowText(uint16_t id, std::string& label, std::string& subtitle);
+  // Label and "N books" subtitle for a list row; returns the list's icon.
+  library::ClixListIcon listRowText(uint16_t id, std::string& label, std::string& subtitle);
+  // A list's name: the firmware's for built-in and generated top-level lists,
+  // its stored label otherwise.
+  void listLabel(const library::ClixListDesc& list, std::string& out);
+  // Whether the row opens a list rather than a book: every picker and Groups
+  // row, and a Mixed list's subfolder rows.
+  bool rowIsList(int entry);
+  bool mixedView() const;
   bool builtinView() const { return currentList < library::CLIX_BUILTIN_LISTS; }
   bool pickerView() const { return pickerOpen && query.empty(); }
+  // In picker mode the header title names the open list and reverses it.
+  bool sortTitleActive() const { return pickerMode && !pickerOpen && query.empty() && !degraded; }
   bool groupsView() const;
   bool listRowsView() const { return pickerView() || groupsView(); }
   bool recentView() const;
@@ -148,6 +158,7 @@ class LibraryListActivity final : public UiTabListActivity {
 
   // Screen building
   void buildHeader(UiScreen& screen);
+  void buildTitleControl(UiScreen& screen, const freeink::ui::Rect& band, const freeink::ui::HeaderProps& header);
   // Materializes ListItems and their strings for the visible window only.
   void buildRows(UiScreen& screen);
   static void formatInitialHeading(uint32_t initial, std::string& out);
@@ -198,7 +209,7 @@ class LibraryListActivity final : public UiTabListActivity {
   bool currentDescending = false;  // external lists; built-in ones use sortOrder
   // Stable c_str()s for the header and the tab strip.
   std::string currentLabel;
-  std::string topLabel;
+  std::string titleText;
   std::string tabLabels[MAX_LIST_TABS];
   // The lists above the current one, outermost first.
   Level levels[MAX_LIST_DEPTH];
