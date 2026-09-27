@@ -47,8 +47,9 @@ class LibraryIndexFile {
   // caused by a format bug is visible in the log rather than looking like a slow
   // first boot.
   bool open(const char* path);
-  // Accept an otherwise valid stale fold so a rebuild can preserve arrival
-  // history without exposing stale sort/search keys to the browser.
+  // Accept an otherwise valid stale fold, or the previous format version, so a
+  // rebuild can preserve arrival history without exposing stale sort/search
+  // keys to the browser. A previous-format index has no lists.
   bool openForReconciliation(const char* path);
   void close();
   bool isOpen() const { return opened; }
@@ -64,6 +65,23 @@ class LibraryIndexFile {
   // 0xFFFF when out of range, which callers treat as "no such row" rather than
   // indexing anyway.
   uint16_t ordinalForRow(SortOrder order, uint16_t row);
+
+  // Lists 0..CLIX_BUILTIN_LISTS-1 are Recent, Title and Author; any later list
+  // came from an external tool. Zero for a closed or previous-format index.
+  uint16_t listCount() const { return opened && !previousFormat ? head.listCount : 0; }
+  // Descriptor of list `id`, validated against the header.
+  bool readList(uint16_t id, ClixListDesc& out);
+  // Entry at display position `row` of list `listId`, reading `list` (its
+  // descriptor) backwards when `descending`: a record ordinal for an identity or
+  // Books list, a child list id for a Groups list. 0xFFFF when out of range or
+  // invalid; a Groups entry is valid only when it names a LATER list, which is
+  // what keeps nesting free of cycles.
+  uint16_t entryAt(uint16_t listId, const ClixListDesc& list, uint16_t row, bool descending);
+  // `count` raw entries of a Books or Groups list starting at `first`, without
+  // checking their values.
+  bool readListEntries(const ClixListDesc& list, uint16_t first, uint16_t count, uint16_t* out);
+  // An external list's label; empty for built-in lists, which use tr().
+  bool readListLabel(const ClixListDesc& list, std::string& out);
 
   // Display rows (RecentAsc space) of up to MAX_IDENTITY_LOOKUPS books, 0xFFFF
   // for books not in the index. One chunked pass over the record section plus
@@ -113,7 +131,10 @@ class LibraryIndexFile {
 
   HalFile file;
   ClixHeader head{};
+  // Read and validated on open, so paging a built-in order reads no descriptor.
+  ClixListDesc builtins[CLIX_BUILTIN_LISTS]{};
   bool opened = false;
+  bool previousFormat = false;
   bool readFailed = false;
   ClixValidity lastValidity = ClixValidity::BadMagic;
 };

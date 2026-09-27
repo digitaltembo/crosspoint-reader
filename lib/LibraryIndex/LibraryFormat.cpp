@@ -18,6 +18,8 @@ const char* clixValidityName(const ClixValidity v) {
       return "book count out of range";
     case ClixValidity::SectionsInconsistent:
       return "section offsets inconsistent";
+    case ClixValidity::ListsInconsistent:
+      return "list table inconsistent";
   }
   return "unknown";
 }

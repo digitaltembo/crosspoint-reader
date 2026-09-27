@@ -11,9 +11,14 @@
 //   header        64 bytes of struct, padded to 512
 //   folders       F variable-length records; the id of a folder IS its ordinal
 //   records       N x exactly 128 bytes, in folded sort-title order
-//   permutations  authorOrder[N] then arrivalOrder[N], both u16
+//   lists         ClixListDesc[listCount], then u16 list entries and list labels
 //   names         path hash, filename, display author, title, source author, and
 //                 author sort (file-as) blobs
+//
+// Lists 0..2 are always Recent, Title and Author. Title is the record order
+// itself and stores no entries. Later lists are written by external tools: a
+// Books list names any subset of records, and a Groups list names other lists,
+// each of which opens as its own row.
 //
 // The fixed 128-byte record stride is the load-bearing choice: record k lives at
 // recordStart + 128k, so paging is O(1) in every sort order with no offset
@@ -29,7 +34,10 @@ namespace library {
 inline constexpr char CLIX_MAGIC[4] = {'C', 'L', 'X', '1'};
 // Bumping this is the whole migration: an index from an older version fails
 // validation and is rebuilt. No previous development format is accepted.
-inline constexpr uint8_t CLIX_FORMAT_VERSION = 2;
+inline constexpr uint8_t CLIX_FORMAT_VERSION = 3;
+// Same folders, records and name blob as the current version, so a rebuild
+// still reads its books to keep their arrival history.
+inline constexpr uint8_t CLIX_PREVIOUS_FORMAT_VERSION = 2;
 
 // Bump when the fold or a permutation's sort key changes.
 // Forces fold and ranks to be rebuilt while firstSeen values are preserved, so
@@ -45,6 +53,14 @@ inline constexpr size_t CLIX_AUTHOR_KEY_BYTES = 12;
 // A 2000-book card already produces a 429 KiB index. This hard bound keeps every
 // record count and permutation ordinal representable by uint16_t.
 inline constexpr uint16_t CLIX_MAX_RECORDS = 4096;
+// Keeps list ids, like record ordinals, in a u16 with room for the 0xFFFF
+// "none" marker.
+inline constexpr uint16_t CLIX_MAX_LISTS = 4096;
+
+inline constexpr uint16_t CLIX_RECENT_LIST = 0;
+inline constexpr uint16_t CLIX_TITLE_LIST = 1;
+inline constexpr uint16_t CLIX_AUTHOR_LIST = 2;
+inline constexpr uint16_t CLIX_BUILTIN_LISTS = 3;
 
 // Complete-path fingerprint stored in front of every record's name blob.
 // Shared by the builder's reconciliation and the browser's recent-book lookup,
@@ -61,6 +77,25 @@ inline uint64_t clixPathHash(const char* data, const size_t len) {
 enum ClixFlags : uint8_t {
   CLIX_FLAG_RANKS_DEGRADED = 1 << 0,
   CLIX_FLAG_DEDUP_DEGRADED = 1 << 1,
+  // External lists from the previous index could not be carried into this one.
+  CLIX_FLAG_LISTS_DROPPED = 1 << 2,
+};
+
+enum ClixListKind : uint8_t {
+  CLIX_LIST_IDENTITY = 0,  // every record, in record (title) order; no entries
+  CLIX_LIST_BOOKS = 1,     // entries are record ordinals
+  CLIX_LIST_GROUPS = 2,    // entries are ids of later lists
+};
+
+enum ClixListRole : uint8_t {
+  CLIX_ROLE_EXTERNAL = 0,
+  CLIX_ROLE_RECENT = 1,
+  CLIX_ROLE_TITLE = 2,
+  CLIX_ROLE_AUTHOR = 3,
+};
+
+enum ClixListFlags : uint8_t {
+  CLIX_LIST_TOP_LEVEL = 1 << 0,
 };
 
 enum ClixMetadataStatus : uint8_t {
@@ -84,13 +119,15 @@ struct ClixHeader {
   uint32_t folderStart;
   uint32_t folderLen;
   uint32_t recordStart;
-  uint32_t permStart;
+  uint32_t listStart;
   uint32_t nameStart;
   uint32_t nameLen;
   // Expected total file size. Comparing it with the real size is a free
   // truncation guard: a build interrupted by a power cut cannot pass.
   uint32_t selfSize;
-  uint8_t reserved[20];
+  uint32_t listLen;
+  uint16_t listCount;
+  uint8_t reserved[14];
 };
 static_assert(sizeof(ClixHeader) == 64, "ClixHeader must be exactly 64 bytes");
 
@@ -117,18 +154,35 @@ struct ClixFolderHeader {
 };
 static_assert(sizeof(ClixFolderHeader) == 1, "ClixFolderHeader must be 1 byte");
 
+// One list. Offsets are from listStart, so the table, the entries and the
+// labels can sit anywhere in the list section.
+struct ClixListDesc {
+  uint8_t kind;   // ClixListKind
+  uint8_t role;   // ClixListRole; built-in lists carry no label and use tr()
+  uint8_t flags;  // ClixListFlags
+  uint8_t labelLen;
+  uint16_t entryCount;  // rows; bookCount for an identity list
+  uint16_t reserved;
+  uint32_t entriesOff;  // u16[entryCount]; unused by an identity list
+  uint32_t labelOff;    // UTF-8, labelLen bytes
+};
+static_assert(sizeof(ClixListDesc) == 16, "ClixListDesc must be exactly 16 bytes");
+
 #pragma pack(pop)
 
 inline uint32_t alignUp(const uint32_t value) { return (value + CLIX_ALIGN - 1) / CLIX_ALIGN * CLIX_ALIGN; }
 
-// Fill in every offset and the expected file size from the counts alone, so the
-// writer and the reader can never disagree about where a section starts.
-inline void layoutSections(ClixHeader& h, const uint32_t folderBytes, const uint32_t nameBytes) {
+// Fill in every offset and the expected file size from the section lengths
+// alone, so the writer and the reader can never disagree about where a section
+// starts.
+inline void layoutSections(ClixHeader& h, const uint32_t folderBytes, const uint32_t listBytes,
+                           const uint32_t nameBytes) {
   h.folderStart = CLIX_ALIGN;
   h.folderLen = folderBytes;
   h.recordStart = alignUp(h.folderStart + folderBytes);
-  h.permStart = alignUp(h.recordStart + static_cast<uint32_t>(h.bookCount) * sizeof(ClixRecord));
-  h.nameStart = alignUp(h.permStart + static_cast<uint32_t>(h.bookCount) * 2u * sizeof(uint16_t));
+  h.listStart = alignUp(h.recordStart + static_cast<uint32_t>(h.bookCount) * sizeof(ClixRecord));
+  h.listLen = listBytes;
+  h.nameStart = alignUp(h.listStart + listBytes);
   h.nameLen = nameBytes;
   h.selfSize = h.nameStart + nameBytes;
 }
@@ -136,11 +190,15 @@ inline void layoutSections(ClixHeader& h, const uint32_t folderBytes, const uint
 inline uint32_t recordOffset(const ClixHeader& h, const uint16_t ordinal) {
   return h.recordStart + static_cast<uint32_t>(ordinal) * sizeof(ClixRecord);
 }
-inline uint32_t authorOrderOffset(const ClixHeader& h, const uint16_t k) {
-  return h.permStart + static_cast<uint32_t>(k) * sizeof(uint16_t);
-}
-inline uint32_t arrivalOrderOffset(const ClixHeader& h, const uint16_t k) {
-  return h.permStart + (static_cast<uint32_t>(h.bookCount) + k) * sizeof(uint16_t);
+
+// The three built-in lists for an index holding `listCount` lists in all.
+// Their entries (Recent, then Author) follow the whole descriptor table.
+inline uint32_t builtinListEntryBytes(const uint16_t books) { return 2u * books * sizeof(uint16_t); }
+inline void builtinListDescs(ClixListDesc* out, const uint16_t books, const uint16_t listCount) {
+  const uint32_t table = static_cast<uint32_t>(listCount) * sizeof(ClixListDesc);
+  out[CLIX_RECENT_LIST] = {CLIX_LIST_BOOKS, CLIX_ROLE_RECENT, CLIX_LIST_TOP_LEVEL, 0, books, 0, table, 0};
+  out[CLIX_TITLE_LIST] = {CLIX_LIST_IDENTITY, CLIX_ROLE_TITLE, CLIX_LIST_TOP_LEVEL, 0, books, 0, 0, 0};
+  out[CLIX_AUTHOR_LIST] = {CLIX_LIST_BOOKS, CLIX_ROLE_AUTHOR, CLIX_LIST_TOP_LEVEL, 0, books, 0, table + books * 2u, 0};
 }
 
 // Why a loaded index was rejected. Reported rather than swallowed so a rebuild
@@ -154,32 +212,65 @@ enum class ClixValidity : uint8_t {
   SizeMismatch,  // truncated, or a build interrupted before the final rename
   CountOutOfRange,
   SectionsInconsistent,
+  ListsInconsistent,  // a built-in list descriptor is missing or malformed
 };
 
 // Validate a header against the real file size. Cheap enough to run on the one
 // sector already read, and strict enough that nothing downstream has to
-// re-check bounds.
-inline ClixValidity validateHeaderStructure(const ClixHeader& h, const uint64_t actualFileSize) {
+// re-check bounds. `acceptPreviousFormat` admits a CLIX_PREVIOUS_FORMAT_VERSION
+// file, whose records and names a rebuild can still read; it has no lists.
+inline ClixValidity validateHeaderStructure(const ClixHeader& h, const uint64_t actualFileSize,
+                                            const bool acceptPreviousFormat = false) {
   for (size_t i = 0; i < sizeof(CLIX_MAGIC); i++) {
     if (h.magic[i] != CLIX_MAGIC[i]) return ClixValidity::BadMagic;
   }
-  if (h.formatVersion != CLIX_FORMAT_VERSION) return ClixValidity::UnknownFormatVersion;
+  const bool previousFormat = acceptPreviousFormat && h.formatVersion == CLIX_PREVIOUS_FORMAT_VERSION;
+  if (h.formatVersion != CLIX_FORMAT_VERSION && !previousFormat) return ClixValidity::UnknownFormatVersion;
   if (h.bookCount > CLIX_MAX_RECORDS) return ClixValidity::CountOutOfRange;
   if (h.metadataEnabled > 1) return ClixValidity::SectionsInconsistent;
   if (actualFileSize != h.selfSize) return ClixValidity::SizeMismatch;
 
-  // Both lengths are attacker-controlled bytes. Capped against the real file
+  // These lengths are attacker-controlled bytes. Capped against the real file
   // size they cannot wrap the 32-bit section sums below, so the layout
   // comparison stays sound instead of re-deriving the same wrapped values.
   if (h.folderLen > actualFileSize || h.nameLen > actualFileSize) return ClixValidity::SectionsInconsistent;
 
+  // The previous format's author and arrival orders occupy the list section's
+  // place, and its header has no list fields.
+  const uint32_t listBytes = previousFormat ? builtinListEntryBytes(h.bookCount) : h.listLen;
+  if (!previousFormat) {
+    if (h.listLen > actualFileSize) return ClixValidity::SectionsInconsistent;
+    if (h.listCount < CLIX_BUILTIN_LISTS || h.listCount > CLIX_MAX_LISTS ||
+        static_cast<uint32_t>(h.listCount) * sizeof(ClixListDesc) > h.listLen) {
+      return ClixValidity::ListsInconsistent;
+    }
+  }
+
   ClixHeader expected = h;
-  layoutSections(expected, h.folderLen, h.nameLen);
+  layoutSections(expected, h.folderLen, listBytes, h.nameLen);
   if (expected.folderStart != h.folderStart || expected.recordStart != h.recordStart ||
-      expected.permStart != h.permStart || expected.nameStart != h.nameStart || expected.selfSize != h.selfSize) {
+      expected.listStart != h.listStart || expected.nameStart != h.nameStart || expected.selfSize != h.selfSize) {
     return ClixValidity::SectionsInconsistent;
   }
   return ClixValidity::Ok;
+}
+
+// Validate list `id`'s descriptor against a header that passed
+// validateHeaderStructure. Entry VALUES are checked as they are read.
+inline bool validateListDesc(const ClixHeader& h, const uint16_t id, const ClixListDesc& d) {
+  if (id >= h.listCount || d.kind > CLIX_LIST_GROUPS || d.role > CLIX_ROLE_AUTHOR) return false;
+  if (d.labelLen > 0 && (d.labelOff > h.listLen || d.labelLen > h.listLen - d.labelOff)) return false;
+  if (d.kind == CLIX_LIST_IDENTITY) {
+    if (d.entryCount != h.bookCount) return false;
+  } else if (d.entriesOff > h.listLen || static_cast<uint32_t>(d.entryCount) * 2u > h.listLen - d.entriesOff) {
+    return false;
+  }
+  if (id >= CLIX_BUILTIN_LISTS) return d.role == CLIX_ROLE_EXTERNAL;
+  // Built-in lists are fixed: Recent and Author name every book, and Title is
+  // the record order.
+  if (d.role != id + 1) return false;
+  if (id == CLIX_TITLE_LIST) return d.kind == CLIX_LIST_IDENTITY;
+  return d.kind == CLIX_LIST_BOOKS && d.entryCount == h.bookCount;
 }
 
 inline ClixValidity validateHeader(const ClixHeader& h, const uint64_t actualFileSize) {

@@ -32,10 +32,24 @@ bool LibraryIndexFile::openImpl(const char* path, const bool acceptStaleFold) {
     return false;
   }
 
-  lastValidity =
-      acceptStaleFold ? validateHeaderStructure(head, file.fileSize64()) : validateHeader(head, file.fileSize64());
+  lastValidity = acceptStaleFold ? validateHeaderStructure(head, file.fileSize64(), true)
+                                 : validateHeader(head, file.fileSize64());
+  previousFormat = lastValidity == ClixValidity::Ok && head.formatVersion != CLIX_FORMAT_VERSION;
+  if (lastValidity == ClixValidity::Ok && !previousFormat) {
+    // The table starts with the built-in lists, so one read covers all three.
+    opened = true;
+    if (!readAt(head.listStart, builtins, sizeof(builtins))) {
+      lastValidity = ClixValidity::SizeMismatch;
+    } else {
+      for (uint16_t id = 0; id < CLIX_BUILTIN_LISTS; id++) {
+        if (!validateListDesc(head, id, builtins[id])) lastValidity = ClixValidity::ListsInconsistent;
+      }
+    }
+    opened = false;
+  }
   if (lastValidity != ClixValidity::Ok) {
     LOG_INF("LIBIDX", "index rejected: %s", clixValidityName(lastValidity));
+    memset(builtins, 0, sizeof(builtins));
     file.close();
     return false;
   }
@@ -46,6 +60,8 @@ bool LibraryIndexFile::openImpl(const char* path, const bool acceptStaleFold) {
 void LibraryIndexFile::close() {
   if (file.isOpen()) file.close();
   opened = false;
+  previousFormat = false;
+  memset(builtins, 0, sizeof(builtins));
 }
 
 bool LibraryIndexFile::readAt(const uint32_t offset, void* dst, const size_t len) {
@@ -61,33 +77,61 @@ bool LibraryIndexFile::readAt(const uint32_t offset, void* dst, const size_t len
 }
 
 uint16_t LibraryIndexFile::ordinalForRow(const SortOrder order, const uint16_t row) {
-  constexpr uint16_t NONE = 0xFFFF;
-  if (!opened || row >= head.bookCount) return NONE;
-
   switch (order) {
     case SortOrder::TitleAsc:
-      // The record section IS in title order, so this costs no storage and no
-      // read at all.
-      return row;
     case SortOrder::TitleDesc:
-      return static_cast<uint16_t>(head.bookCount - 1 - row);
+      return entryAt(CLIX_TITLE_LIST, builtins[CLIX_TITLE_LIST], row, order == SortOrder::TitleDesc);
     case SortOrder::AuthorAsc:
-    case SortOrder::AuthorDesc: {
-      const uint16_t k = order == SortOrder::AuthorAsc ? row : static_cast<uint16_t>(head.bookCount - 1 - row);
-      uint16_t ordinal = NONE;
-      return readAt(authorOrderOffset(head, k), &ordinal, sizeof(ordinal)) && ordinal < head.bookCount ? ordinal : NONE;
-    }
+    case SortOrder::AuthorDesc:
+      return entryAt(CLIX_AUTHOR_LIST, builtins[CLIX_AUTHOR_LIST], row, order == SortOrder::AuthorDesc);
     case SortOrder::RecentAsc:
-    case SortOrder::RecentDesc: {
-      // arrivalOrder runs oldest first, so both directions share one on-disk
-      // permutation.
-      const uint16_t k = order == SortOrder::RecentAsc ? row : static_cast<uint16_t>(head.bookCount - 1 - row);
-      uint16_t ordinal = NONE;
-      return readAt(arrivalOrderOffset(head, k), &ordinal, sizeof(ordinal)) && ordinal < head.bookCount ? ordinal
-                                                                                                        : NONE;
-    }
+    case SortOrder::RecentDesc:
+      // Recent runs oldest first, so both directions share one stored list.
+      return entryAt(CLIX_RECENT_LIST, builtins[CLIX_RECENT_LIST], row, order == SortOrder::RecentDesc);
   }
-  return NONE;
+  return 0xFFFF;
+}
+
+bool LibraryIndexFile::readList(const uint16_t id, ClixListDesc& out) {
+  if (id >= listCount()) return false;
+  if (id < CLIX_BUILTIN_LISTS) {
+    out = builtins[id];
+    return true;
+  }
+  if (!readAt(head.listStart + static_cast<uint32_t>(id) * sizeof(ClixListDesc), &out, sizeof(out))) return false;
+  return validateListDesc(head, id, out);
+}
+
+uint16_t LibraryIndexFile::entryAt(const uint16_t listId, const ClixListDesc& list, const uint16_t row,
+                                   const bool descending) {
+  constexpr uint16_t NONE = 0xFFFF;
+  if (listId >= listCount() || row >= list.entryCount) return NONE;
+  const uint16_t k = descending ? static_cast<uint16_t>(list.entryCount - 1 - row) : row;
+  // The record section IS in title order, so an identity list costs no storage
+  // and no read at all.
+  if (list.kind == CLIX_LIST_IDENTITY) return k < head.bookCount ? k : NONE;
+  uint16_t entry = NONE;
+  if (!readListEntries(list, k, 1, &entry)) return NONE;
+  if (list.kind == CLIX_LIST_BOOKS) return entry < head.bookCount ? entry : NONE;
+  return entry > listId && entry < head.listCount ? entry : NONE;
+}
+
+bool LibraryIndexFile::readListEntries(const ClixListDesc& list, const uint16_t first, const uint16_t count,
+                                       uint16_t* out) {
+  if (list.kind == CLIX_LIST_IDENTITY || first > list.entryCount || count > list.entryCount - first) return false;
+  return count == 0 || readAt(head.listStart + list.entriesOff + static_cast<uint32_t>(first) * sizeof(uint16_t), out,
+                              static_cast<size_t>(count) * sizeof(uint16_t));
+}
+
+bool LibraryIndexFile::readListLabel(const ClixListDesc& list, std::string& out) {
+  out.clear();
+  if (list.labelLen == 0) return opened;
+  out.resize(list.labelLen);
+  if (!readAt(head.listStart + list.labelOff, out.data(), list.labelLen)) {
+    out.clear();
+    return false;
+  }
+  return true;
 }
 
 bool LibraryIndexFile::recentRowsFor(const BookIdentity* books, const size_t count, uint16_t* outRows) {
@@ -135,11 +179,11 @@ bool LibraryIndexFile::recentRowsFor(const BookIdentity* books, const size_t cou
     }
   }
 
-  // Pass 2: arrival permutation, translating matched ordinals to ascending
-  // rows.
-  for (uint16_t base = 0; base < head.bookCount && unresolved < count; base += CHUNK_RECORDS * 2) {
-    const uint16_t batch = std::min<uint16_t>(CHUNK_RECORDS * 2, head.bookCount - base);
-    if (!readAt(arrivalOrderOffset(head, base), chunk.get(), batch * sizeof(uint16_t))) return false;
+  // Pass 2: the Recent list, translating matched ordinals to ascending rows.
+  const ClixListDesc& recent = builtins[CLIX_RECENT_LIST];
+  for (uint16_t base = 0; base < recent.entryCount && unresolved < count; base += CHUNK_RECORDS * 2) {
+    const uint16_t batch = std::min<uint16_t>(CHUNK_RECORDS * 2, recent.entryCount - base);
+    if (!readListEntries(recent, base, batch, reinterpret_cast<uint16_t*>(chunk.get()))) return false;
     for (uint16_t k = 0; k < batch; k++) {
       uint16_t ordinal;
       memcpy(&ordinal, chunk.get() + k * sizeof(uint16_t), sizeof(uint16_t));

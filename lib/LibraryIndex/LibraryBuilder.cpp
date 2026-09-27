@@ -590,12 +590,13 @@ bool emitIndex(const char* folderStagePath, WalkState& st, const uint16_t* order
   header.metadataEnabled = st.readMetadata;
   // Placeholder only. Degradations are known after the sorts have run.
   header.flags = 0;
+  header.listCount = CLIX_BUILTIN_LISTS;
   // The blob is the LAST section, so its size affects only selfSize — every
   // section offset is already fixed by the counts. Lay out with a placeholder
   // and correct selfSize once the blob has actually been written, since the
   // author spelling each record ends up carrying is not known until the
   // one-spelling-per-person pass has run.
-  layoutSections(header, st.folderBytes, 0);
+  layoutSections(header, st.folderBytes, CLIX_BUILTIN_LISTS * sizeof(ClixListDesc) + builtinListEntryBytes(n), 0);
 
   HalFile stage;
   HalFile out;
@@ -1012,16 +1013,19 @@ bool emitIndex(const char* folderStagePath, WalkState& st, const uint16_t* order
     if (resolvedFirstSeen) entry.record.firstSeen = resolvedFirstSeen[order[i]];
     put(&entry.record, sizeof(ClixRecord));
   }
-  padTo(header.permStart);
+  padTo(header.listStart);
 
+  ClixListDesc builtins[CLIX_BUILTIN_LISTS];
+  builtinListDescs(builtins, n, header.listCount);
+  put(builtins, sizeof(builtins));
   for (uint16_t k = 0; k < n; k++) {
     serviceBuilder(serviceUnits);
-    const uint16_t ordinal = authorSort ? authorSort[k].ordinal : k;
+    const uint16_t ordinal = arrivalOrder[k];
     put(&ordinal, sizeof(ordinal));
   }
   for (uint16_t k = 0; k < n; k++) {
     serviceBuilder(serviceUnits);
-    const uint16_t ordinal = arrivalOrder[k];
+    const uint16_t ordinal = authorSort ? authorSort[k].ordinal : k;
     put(&ordinal, sizeof(ordinal));
   }
   padTo(header.nameStart);
@@ -1238,8 +1242,9 @@ bool buildLibraryIndex(const char* rootPath, BuildStats& stats, const bool readM
   stats.unchanged = st.reused;
   stats.enriched = st.enriched;
 
-  if (previous.isOpen() && st.books == priorCount && st.reused == priorCount && stats.metadataReused == priorCount &&
-      st.unreadableSkipped == 0) {
+  // A previous-format index reuses its books' metadata but is still rewritten.
+  if (previous.isOpen() && previous.header().formatVersion == CLIX_FORMAT_VERSION && st.books == priorCount &&
+      st.reused == priorCount && stats.metadataReused == priorCount && st.unreadableSkipped == 0) {
     previous.close();
     Storage.remove(STAGE_PATH);
     Storage.remove(folderStagePath.c_str());

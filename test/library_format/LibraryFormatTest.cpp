@@ -11,6 +11,10 @@ namespace {
 
 // A header for N books whose sections are laid out consistently, i.e. one that
 // validateHeader() must accept. Tests then damage exactly one thing.
+uint32_t builtinListBytes(const uint16_t books) {
+  return CLIX_BUILTIN_LISTS * sizeof(ClixListDesc) + builtinListEntryBytes(books);
+}
+
 ClixHeader makeHeader(const uint16_t books, const uint32_t folderBytes = 300, const uint32_t nameBytes = 0) {
   ClixHeader h{};
   memcpy(h.magic, CLIX_MAGIC, sizeof(CLIX_MAGIC));
@@ -18,7 +22,8 @@ ClixHeader makeHeader(const uint16_t books, const uint32_t folderBytes = 300, co
   h.foldVersion = CLIX_FOLD_VERSION;
   h.bookCount = books;
   h.folderCount = 4;
-  layoutSections(h, folderBytes, nameBytes == 0 ? books * 80u : nameBytes);
+  h.listCount = CLIX_BUILTIN_LISTS;
+  layoutSections(h, folderBytes, builtinListBytes(books), nameBytes == 0 ? books * 80u : nameBytes);
   return h;
 }
 
@@ -30,7 +35,8 @@ TEST(LibraryFormat, StructSizesAreFrozen) {
   EXPECT_EQ(sizeof(ClixHeader), 64u);
   EXPECT_EQ(sizeof(ClixRecord), 128u);
   EXPECT_EQ(sizeof(ClixFolderHeader), 1u);
-  EXPECT_EQ(CLIX_FORMAT_VERSION, 2u);
+  EXPECT_EQ(sizeof(ClixListDesc), 16u);
+  EXPECT_EQ(CLIX_FORMAT_VERSION, 3u);
 }
 
 TEST(LibraryFormat, RecordsTileSectorsExactly) {
@@ -47,7 +53,7 @@ TEST(LibraryFormat, EverySectionStartsOnASectorBoundary) {
     const ClixHeader h = makeHeader(n, 29u * 4u);
     EXPECT_EQ(h.folderStart % CLIX_ALIGN, 0u) << "n=" << n;
     EXPECT_EQ(h.recordStart % CLIX_ALIGN, 0u) << "n=" << n;
-    EXPECT_EQ(h.permStart % CLIX_ALIGN, 0u) << "n=" << n;
+    EXPECT_EQ(h.listStart % CLIX_ALIGN, 0u) << "n=" << n;
     EXPECT_EQ(h.nameStart % CLIX_ALIGN, 0u) << "n=" << n;
   }
 }
@@ -56,8 +62,8 @@ TEST(LibraryFormat, SectionsDoNotOverlap) {
   const ClixHeader h = makeHeader(200, 29u * 50u);
   EXPECT_GE(h.folderStart, sizeof(ClixHeader));
   EXPECT_GE(h.recordStart, h.folderStart + h.folderLen);
-  EXPECT_GE(h.permStart, h.recordStart + 200u * sizeof(ClixRecord));
-  EXPECT_GE(h.nameStart, h.permStart + 200u * 2u * sizeof(uint16_t));
+  EXPECT_GE(h.listStart, h.recordStart + 200u * sizeof(ClixRecord));
+  EXPECT_GE(h.nameStart, h.listStart + h.listLen);
   EXPECT_EQ(h.selfSize, h.nameStart + h.nameLen);
 }
 
@@ -70,26 +76,83 @@ TEST(LibraryFormat, RecordOffsetsAreAlignedAndOrdered) {
   for (uint16_t k = 0; k < 64; k += 4) EXPECT_EQ(recordOffset(h, k) % CLIX_ALIGN, 0u);
 }
 
-TEST(LibraryFormat, PermutationArraysDoNotOverlapEachOther) {
+TEST(LibraryFormat, BuiltinListsAreValidAndTheirEntriesFollowTheWholeTable) {
   const ClixHeader h = makeHeader(100, 116);
-  EXPECT_EQ(authorOrderOffset(h, 0), h.permStart);
-  EXPECT_EQ(authorOrderOffset(h, 99), h.permStart + 198u);
-  EXPECT_EQ(arrivalOrderOffset(h, 0), h.permStart + 200u);
-  EXPECT_GT(arrivalOrderOffset(h, 0), authorOrderOffset(h, h.bookCount - 1));
+  ClixListDesc lists[CLIX_BUILTIN_LISTS];
+  builtinListDescs(lists, h.bookCount, h.listCount);
+  for (uint16_t id = 0; id < CLIX_BUILTIN_LISTS; id++) {
+    EXPECT_TRUE(validateListDesc(h, id, lists[id])) << id;
+    EXPECT_NE(lists[id].flags & CLIX_LIST_TOP_LEVEL, 0) << id;
+  }
+  EXPECT_EQ(lists[CLIX_RECENT_LIST].entriesOff, 48u);
+  EXPECT_EQ(lists[CLIX_AUTHOR_LIST].entriesOff, 248u);
+  EXPECT_EQ(lists[CLIX_AUTHOR_LIST].entriesOff + 200u, h.listLen);
+
+  // With external lists the table grows and the built-in entries move past it.
+  builtinListDescs(lists, h.bookCount, 10);
+  EXPECT_EQ(lists[CLIX_RECENT_LIST].entriesOff, 160u);
+  EXPECT_EQ(lists[CLIX_AUTHOR_LIST].entriesOff, 360u);
+}
+
+TEST(LibraryFormat, ExternalListDescriptorsAreBoundedByTheListSection) {
+  ClixHeader h = makeHeader(100, 116);
+  h.listCount = 5;
+  h.listLen = 1000;
+  const ClixListDesc books{CLIX_LIST_BOOKS, CLIX_ROLE_EXTERNAL, 0, 3, 40, 0, 900, 997};
+  EXPECT_TRUE(validateListDesc(h, 3, books));
+  EXPECT_FALSE(validateListDesc(h, 5, books)) << "id past the table";
+
+  ClixListDesc bad = books;
+  bad.entryCount = 51;  // 102 bytes from 900 overruns 1000
+  EXPECT_FALSE(validateListDesc(h, 3, bad));
+  bad = books;
+  bad.entriesOff = UINT32_MAX;
+  EXPECT_FALSE(validateListDesc(h, 3, bad));
+  bad = books;
+  bad.labelLen = 4;  // 997 + 4 overruns 1000
+  EXPECT_FALSE(validateListDesc(h, 3, bad));
+  bad = books;
+  bad.role = CLIX_ROLE_AUTHOR;
+  EXPECT_FALSE(validateListDesc(h, 3, bad)) << "external ids cannot claim a built-in role";
+  bad = books;
+  bad.kind = 3;
+  EXPECT_FALSE(validateListDesc(h, 3, bad));
+
+  // A Books list may name fewer books than the library holds, but an identity
+  // list is the whole record order.
+  const ClixListDesc identity{CLIX_LIST_IDENTITY, CLIX_ROLE_EXTERNAL, 0, 0, 100, 0, UINT32_MAX, 0};
+  EXPECT_TRUE(validateListDesc(h, 4, identity));
+  bad = identity;
+  bad.entryCount = 99;
+  EXPECT_FALSE(validateListDesc(h, 4, bad));
+}
+
+TEST(LibraryFormat, BuiltinListsCannotBeReplaced) {
+  const ClixHeader h = makeHeader(100, 116);
+  ClixListDesc lists[CLIX_BUILTIN_LISTS];
+  builtinListDescs(lists, h.bookCount, h.listCount);
+
+  ClixListDesc partialRecent = lists[CLIX_RECENT_LIST];
+  partialRecent.entryCount = 99;
+  EXPECT_FALSE(validateListDesc(h, CLIX_RECENT_LIST, partialRecent));
+  ClixListDesc booksTitle = lists[CLIX_AUTHOR_LIST];
+  booksTitle.role = CLIX_ROLE_TITLE;
+  EXPECT_FALSE(validateListDesc(h, CLIX_TITLE_LIST, booksTitle));
+  EXPECT_FALSE(validateListDesc(h, CLIX_TITLE_LIST, lists[CLIX_AUTHOR_LIST]));
 }
 
 TEST(LibraryFormat, SizeArithmeticMatchesTheSpecTable) {
-  // Spec section 3.7, the 200-book row: 512 header + 1536 folders + 25600
-  // records + 1024 permutations + 16000 names.
+  // The 200-book row: 512 header + 1536 folders + 25600 records + 1024 for the
+  // built-in lists (48 table + 800 entries) + 16000 names.
   ClixHeader h{};
   memcpy(h.magic, CLIX_MAGIC, sizeof(CLIX_MAGIC));
   h.formatVersion = CLIX_FORMAT_VERSION;
   h.foldVersion = CLIX_FOLD_VERSION;
   h.bookCount = 200;
-  layoutSections(h, 29u * 50u, 80u * 200u);
+  layoutSections(h, 29u * 50u, builtinListBytes(200), 80u * 200u);
   EXPECT_EQ(h.folderStart, 512u);
   EXPECT_EQ(h.recordStart, 2048u);
-  EXPECT_EQ(h.permStart, 2048u + 25600u);
+  EXPECT_EQ(h.listStart, 2048u + 25600u);
   EXPECT_EQ(h.selfSize, 44672u);
 }
 
@@ -120,6 +183,36 @@ TEST(LibraryFormatValidation, RejectsUnknownVersionsSeparately) {
 
   // Reconciliation may ignore only the fold version, never damaged layout.
   EXPECT_EQ(validateHeaderStructure(h, h.selfSize - 1), ClixValidity::SizeMismatch);
+}
+
+TEST(LibraryFormatValidation, PreviousFormatIsReadableOnlyForReconciliation) {
+  // Version 2 kept author[N] then arrival[N] where the list section now sits,
+  // and zeros where the list fields now are.
+  ClixHeader h = makeHeader(60, 116);
+  h.formatVersion = CLIX_PREVIOUS_FORMAT_VERSION;
+  h.listLen = 0;
+  h.listCount = 0;
+  EXPECT_EQ(validateHeader(h, h.selfSize), ClixValidity::UnknownFormatVersion);
+  EXPECT_EQ(validateHeaderStructure(h, h.selfSize), ClixValidity::UnknownFormatVersion);
+  EXPECT_EQ(validateHeaderStructure(h, h.selfSize, true), ClixValidity::Ok);
+  EXPECT_EQ(validateHeaderStructure(h, h.selfSize - 1, true), ClixValidity::SizeMismatch);
+  h.formatVersion = CLIX_PREVIOUS_FORMAT_VERSION - 1;
+  EXPECT_EQ(validateHeaderStructure(h, h.selfSize, true), ClixValidity::UnknownFormatVersion);
+}
+
+TEST(LibraryFormatValidation, RejectsAListTableThatCannotHoldTheBuiltinLists) {
+  ClixHeader h = makeHeader(60, 116);
+  h.listCount = CLIX_BUILTIN_LISTS - 1;
+  EXPECT_EQ(validateHeader(h, h.selfSize), ClixValidity::ListsInconsistent);
+  h = makeHeader(60, 116);
+  h.listCount = CLIX_MAX_LISTS + 1;
+  EXPECT_EQ(validateHeader(h, h.selfSize), ClixValidity::ListsInconsistent);
+  h = makeHeader(60, 116);
+  h.listCount = static_cast<uint16_t>(h.listLen / sizeof(ClixListDesc) + 1);
+  EXPECT_EQ(validateHeader(h, h.selfSize), ClixValidity::ListsInconsistent);
+  h = makeHeader(60, 116);
+  h.listLen = 0xFFFFFF00u;
+  EXPECT_EQ(validateHeader(h, h.selfSize), ClixValidity::SectionsInconsistent);
 }
 
 TEST(LibraryFormatValidation, RejectsLengthsBeyondTheFile) {
@@ -165,9 +258,11 @@ TEST(LibraryFormatValidation, AcceptsAnEmptyLibrary) {
   // A card with no books must produce a valid index, not a rebuild every boot.
   ClixHeader h = makeHeader(0, 0, 1);
   h.nameLen = 0;
-  layoutSections(h, 0, 0);
+  layoutSections(h, 0, builtinListBytes(0), 0);
   EXPECT_EQ(validateHeader(h, h.selfSize), ClixValidity::Ok);
-  EXPECT_EQ(h.selfSize, CLIX_ALIGN);
+  // Header sector, then the list table's sector; folders and records are empty.
+  EXPECT_EQ(h.listStart, CLIX_ALIGN);
+  EXPECT_EQ(h.selfSize, 2 * CLIX_ALIGN);
 }
 
 TEST(LibraryHeaderFlags, DedupDegradationIsPersistedWithoutChangingTheLayout) {
@@ -197,5 +292,12 @@ TEST(LibraryFormat, ByteImageIsStableAcrossBuilds) {
   EXPECT_EQ(offsetof(ClixHeader, metadataEnabled), 7u);
   EXPECT_EQ(offsetof(ClixHeader, bookCount), 8u);
   EXPECT_EQ(offsetof(ClixHeader, folderStart), 16u);
+  EXPECT_EQ(offsetof(ClixHeader, listStart), 28u);
   EXPECT_EQ(offsetof(ClixHeader, selfSize), 40u);
+  EXPECT_EQ(offsetof(ClixHeader, listLen), 44u);
+  EXPECT_EQ(offsetof(ClixHeader, listCount), 48u);
+
+  EXPECT_EQ(offsetof(ClixListDesc, entryCount), 4u);
+  EXPECT_EQ(offsetof(ClixListDesc, entriesOff), 8u);
+  EXPECT_EQ(offsetof(ClixListDesc, labelOff), 12u);
 }

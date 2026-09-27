@@ -33,6 +33,35 @@ std::string pathAt(LibraryIndexFile& index, const SortOrder order, const uint16_
   return index.readPath(record, path) ? path : std::string();
 }
 
+// Rewrite a current index as the previous format would have stored it: same
+// folders, records and names, with author[N] and arrival[N] in the list
+// section's place and no list fields.
+std::vector<uint8_t> asPreviousFormat(const std::vector<uint8_t>& current) {
+  ClixHeader from{};
+  std::memcpy(&from, current.data(), sizeof(from));
+  ClixHeader to = from;
+  to.formatVersion = CLIX_PREVIOUS_FORMAT_VERSION;
+  to.listCount = 0;
+  layoutSections(to, from.folderLen, builtinListEntryBytes(from.bookCount), from.nameLen);
+  to.listLen = 0;
+  std::vector<uint8_t> bytes(to.selfSize, 0);
+  std::memcpy(bytes.data(), &to, sizeof(to));
+  std::copy_n(current.begin() + from.folderStart, from.listStart - from.folderStart, bytes.begin() + to.folderStart);
+  std::copy_n(current.begin() + from.nameStart, from.nameLen, bytes.begin() + to.nameStart);
+  return bytes;
+}
+
+uint16_t firstSeenOf(LibraryIndexFile& index, const std::string& path) {
+  for (uint16_t ordinal = 0; ordinal < index.bookCount(); ordinal++) {
+    ClixRecord record{};
+    std::string recordPath;
+    if (index.readRecord(ordinal, record) && index.readPath(record, recordPath) && recordPath == path) {
+      return record.firstSeen;
+    }
+  }
+  return 0xFFFF;
+}
+
 class LibraryBuilderTest : public ::testing::Test {
  protected:
   BuildStats stats;
@@ -61,6 +90,33 @@ TEST_F(LibraryBuilderTest, UnchangedRebuildReusesMetadataAndDoesNotReplaceIndex)
   EXPECT_EQ(stats.metadataReused, 2);
   EXPECT_FALSE(stats.indexReplaced);
   EXPECT_EQ(fake::files[INDEX]->bytes, old);
+}
+
+TEST_F(LibraryBuilderTest, PreviousFormatIndexIsRewrittenKeepingArrivalHistoryAndMetadata) {
+  initial();
+  fake::files[INDEX]->bytes = asPreviousFormat(fake::files[INDEX]->bytes);
+  fake::parses = 0;
+
+  // Nothing changed on the card, but the index still has to move to the
+  // current format.
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_TRUE(stats.indexReplaced);
+  EXPECT_EQ(fake::parses, 0u);
+  EXPECT_EQ(stats.metadataReused, 2);
+
+  fake::files[INDEX]->bytes = asPreviousFormat(fake::files[INDEX]->bytes);
+  fake::add("/c.epub");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_EQ(stats.unchanged, 2);
+  EXPECT_EQ(stats.added, 1);
+  EXPECT_EQ(fake::parses, 1u);
+
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  EXPECT_EQ(index.header().formatVersion, CLIX_FORMAT_VERSION);
+  EXPECT_EQ(firstSeenOf(index, "/a.epub"), 0);
+  EXPECT_EQ(firstSeenOf(index, "/b.epub"), 1);
+  EXPECT_EQ(firstSeenOf(index, "/c.epub"), 2);
 }
 
 TEST_F(LibraryBuilderTest, FolderHeavyUnchangedReconciliationIoScalesLinearly) {

@@ -23,6 +23,52 @@ std::vector<uint8_t> makeBlob(const uint64_t pathHash, const std::initializer_li
   return blob;
 }
 
+// A valid index image for `books` records: the built-in lists (Recent and
+// Author in identity order unless given) and `extraListBytes` of list section
+// after them for a test's external lists. `listCount` includes those lists.
+struct Image {
+  library::ClixHeader header{};
+  std::vector<uint8_t> bytes;
+
+  uint8_t* list(const uint32_t offset) { return bytes.data() + header.listStart + offset; }
+  // First byte of the list section after the table and the built-in entries.
+  uint32_t externalStart() const {
+    return header.listCount * sizeof(library::ClixListDesc) + library::builtinListEntryBytes(header.bookCount);
+  }
+  void setList(const uint16_t id, const library::ClixListDesc& desc) {
+    std::memcpy(list(id * sizeof(desc)), &desc, sizeof(desc));
+  }
+  void setEntries(const uint32_t offset, const std::vector<uint16_t>& entries) {
+    std::memcpy(list(offset), entries.data(), entries.size() * sizeof(uint16_t));
+  }
+};
+
+Image makeImage(const uint16_t books, const uint32_t folderBytes = 0, const uint32_t nameBytes = 0,
+                const std::vector<uint16_t>& recent = {}, const std::vector<uint16_t>& author = {},
+                const uint16_t listCount = library::CLIX_BUILTIN_LISTS, const uint32_t extraListBytes = 0) {
+  Image image;
+  auto& h = image.header;
+  std::memcpy(h.magic, library::CLIX_MAGIC, sizeof(h.magic));
+  h.formatVersion = library::CLIX_FORMAT_VERSION;
+  h.foldVersion = library::CLIX_FOLD_VERSION;
+  h.bookCount = books;
+  h.listCount = listCount;
+  library::layoutSections(
+      h, folderBytes,
+      listCount * sizeof(library::ClixListDesc) + library::builtinListEntryBytes(books) + extraListBytes, nameBytes);
+  image.bytes.assign(h.selfSize, 0);
+  std::memcpy(image.bytes.data(), &h, sizeof(h));
+
+  library::ClixListDesc lists[library::CLIX_BUILTIN_LISTS];
+  library::builtinListDescs(lists, books, listCount);
+  for (uint16_t id = 0; id < library::CLIX_BUILTIN_LISTS; id++) image.setList(id, lists[id]);
+  std::vector<uint16_t> identity(books);
+  for (uint16_t i = 0; i < books; i++) identity[i] = i;
+  image.setEntries(lists[library::CLIX_RECENT_LIST].entriesOff, recent.empty() ? identity : recent);
+  image.setEntries(lists[library::CLIX_AUTHOR_LIST].entriesOff, author.empty() ? identity : author);
+  return image;
+}
+
 }  // namespace
 
 TEST(LibraryIndexFile, MissingIndexDoesNotCloseAnUninitializedHandle) {
@@ -38,20 +84,7 @@ TEST(LibraryIndexFile, MissingIndexDoesNotCloseAnUninitializedHandle) {
 }
 
 TEST(LibraryIndexFile, ReadsEveryStoredOrderInBothDirections) {
-  library::ClixHeader header{};
-  std::memcpy(header.magic, library::CLIX_MAGIC, sizeof(header.magic));
-  header.formatVersion = library::CLIX_FORMAT_VERSION;
-  header.foldVersion = library::CLIX_FOLD_VERSION;
-  header.bookCount = 3;
-  library::layoutSections(header, 0, 0);
-
-  std::vector<uint8_t> bytes(header.selfSize, 0);
-  std::memcpy(bytes.data(), &header, sizeof(header));
-  const uint16_t authorOrder[] = {2, 0, 1};
-  const uint16_t arrivalOrder[] = {1, 2, 0};
-  std::memcpy(bytes.data() + library::authorOrderOffset(header, 0), authorOrder, sizeof(authorOrder));
-  std::memcpy(bytes.data() + library::arrivalOrderOffset(header, 0), arrivalOrder, sizeof(arrivalOrder));
-  Storage.setFile("/library.clx", std::move(bytes));
+  Storage.setFile("/library.clx", makeImage(3, 0, 0, {1, 2, 0}, {2, 0, 1}).bytes);
 
   library::LibraryIndexFile index;
   ASSERT_TRUE(index.open("/library.clx"));
@@ -71,15 +104,9 @@ TEST(LibraryIndexFile, ReadsEveryStoredOrderInBothDirections) {
 }
 
 TEST(LibraryIndexFile, ResolvesRecentRowsByIdentity) {
-  library::ClixHeader header{};
-  std::memcpy(header.magic, library::CLIX_MAGIC, sizeof(header.magic));
-  header.formatVersion = library::CLIX_FORMAT_VERSION;
-  header.foldVersion = library::CLIX_FOLD_VERSION;
-  header.bookCount = 3;
   // One 8-byte path hash blob per record.
-  library::layoutSections(header, 0, 3 * sizeof(uint64_t));
-  std::vector<uint8_t> bytes(header.selfSize, 0);
-  std::memcpy(bytes.data(), &header, sizeof(header));
+  Image image = makeImage(3, 0, 3 * sizeof(uint64_t), {1, 2, 0});
+  const auto& header = image.header;
 
   // Ordinals 0 and 2 share a size, so only the hash can tell them apart.
   constexpr uint64_t HASHES[] = {11, 22, 33};
@@ -88,12 +115,10 @@ TEST(LibraryIndexFile, ResolvesRecentRowsByIdentity) {
     library::ClixRecord record{};
     record.fileSize = SIZES[ordinal];
     record.nameOff = ordinal * sizeof(uint64_t);
-    std::memcpy(bytes.data() + library::recordOffset(header, ordinal), &record, sizeof(record));
-    std::memcpy(bytes.data() + header.nameStart + record.nameOff, &HASHES[ordinal], sizeof(uint64_t));
+    std::memcpy(image.bytes.data() + library::recordOffset(header, ordinal), &record, sizeof(record));
+    std::memcpy(image.bytes.data() + header.nameStart + record.nameOff, &HASHES[ordinal], sizeof(uint64_t));
   }
-  const uint16_t arrivalOrder[] = {1, 2, 0};
-  std::memcpy(bytes.data() + library::arrivalOrderOffset(header, 0), arrivalOrder, sizeof(arrivalOrder));
-  Storage.setFile("/library.clx", std::move(bytes));
+  Storage.setFile("/library.clx", std::move(image.bytes));
 
   library::LibraryIndexFile index;
   ASSERT_TRUE(index.open("/library.clx"));
@@ -114,35 +139,121 @@ TEST(LibraryIndexFile, ResolvesRecentRowsByIdentity) {
 }
 
 TEST(LibraryIndexFile, RejectsInvalidPermutationOrdinal) {
-  library::ClixHeader header{};
-  std::memcpy(header.magic, library::CLIX_MAGIC, sizeof(header.magic));
-  header.formatVersion = library::CLIX_FORMAT_VERSION;
-  header.foldVersion = library::CLIX_FOLD_VERSION;
-  header.bookCount = 1;
-  library::layoutSections(header, 0, 0);
-  std::vector<uint8_t> bytes(header.selfSize, 0);
-  std::memcpy(bytes.data(), &header, sizeof(header));
-  const uint16_t invalid = 1;
-  std::memcpy(bytes.data() + library::authorOrderOffset(header, 0), &invalid, sizeof(invalid));
-  Storage.setFile("/library.clx", std::move(bytes));
+  Storage.setFile("/library.clx", makeImage(1, 0, 0, {}, {1}).bytes);
 
   library::LibraryIndexFile index;
   ASSERT_TRUE(index.open("/library.clx"));
   EXPECT_EQ(index.ordinalForRow(library::SortOrder::AuthorAsc, 0), 0xFFFF);
 }
 
-TEST(LibraryIndexFile, ReadsPathHashAndEveryPublicBlobField) {
+TEST(LibraryIndexFile, RejectsAMalformedBuiltinList) {
+  Image image = makeImage(2);
+  library::ClixListDesc recent{};
+  std::memcpy(&recent, image.list(0), sizeof(recent));
+  recent.entryCount = 1;  // Recent must name every book
+  image.setList(library::CLIX_RECENT_LIST, recent);
+  Storage.setFile("/library.clx", std::move(image.bytes));
+
+  library::LibraryIndexFile index;
+  EXPECT_FALSE(index.open("/library.clx"));
+  EXPECT_EQ(index.validity(), library::ClixValidity::ListsInconsistent);
+  EXPECT_FALSE(index.openForReconciliation("/library.clx"));
+}
+
+TEST(LibraryIndexFile, PreviousFormatOpensOnlyForReconciliationAndHasNoLists) {
+  // Version 2: author[N] then arrival[N] where the list section now starts.
   library::ClixHeader header{};
   std::memcpy(header.magic, library::CLIX_MAGIC, sizeof(header.magic));
-  header.formatVersion = library::CLIX_FORMAT_VERSION;
+  header.formatVersion = library::CLIX_PREVIOUS_FORMAT_VERSION;
   header.foldVersion = library::CLIX_FOLD_VERSION;
-  header.bookCount = 1;
+  header.bookCount = 2;
+  library::layoutSections(header, 0, library::builtinListEntryBytes(2), 0);
+  header.listLen = 0;
+  std::vector<uint8_t> bytes(header.selfSize, 0);
+  std::memcpy(bytes.data(), &header, sizeof(header));
+  Storage.setFile("/library.clx", std::move(bytes));
+
+  library::LibraryIndexFile index;
+  EXPECT_FALSE(index.open("/library.clx"));
+  EXPECT_EQ(index.validity(), library::ClixValidity::UnknownFormatVersion);
+  ASSERT_TRUE(index.openForReconciliation("/library.clx"));
+  EXPECT_EQ(index.bookCount(), 2);
+  EXPECT_EQ(index.listCount(), 0);
+  EXPECT_EQ(index.ordinalForRow(library::SortOrder::TitleAsc, 0), 0xFFFF);
+  library::ClixListDesc list{};
+  EXPECT_FALSE(index.readList(library::CLIX_TITLE_LIST, list));
+}
+
+TEST(LibraryIndexFile, ReadsPartialAndNestedExternalLists) {
+  // List 3: top-level Groups {4, 5}. List 4: Books {2, 0}. List 5: Books {1}.
+  // List 6: a Groups list pointing back at an EARLIER list, which must not be
+  // followed.
+  constexpr uint16_t LISTS = 7;
+  Image image = makeImage(3, 0, 0, {}, {}, LISTS, 64);
+  const uint32_t base = image.externalStart();
+  image.setList(3, {library::CLIX_LIST_GROUPS, library::CLIX_ROLE_EXTERNAL, library::CLIX_LIST_TOP_LEVEL, 4, 2, 0, base,
+                    base + 40});
+  image.setList(4, {library::CLIX_LIST_BOOKS, library::CLIX_ROLE_EXTERNAL, 0, 7, 2, 0, base + 4, base + 44});
+  image.setList(5, {library::CLIX_LIST_BOOKS, library::CLIX_ROLE_EXTERNAL, 0, 0, 1, 0, base + 8, 0});
+  image.setList(6, {library::CLIX_LIST_GROUPS, library::CLIX_ROLE_EXTERNAL, 0, 0, 1, 0, base + 10, 0});
+  image.setEntries(base, {4, 5, 2, 0, 1, 3});
+  std::memcpy(image.list(base + 40), "TagsFiction", 11);
+  Storage.setFile("/library.clx", std::move(image.bytes));
+
+  library::LibraryIndexFile index;
+  ASSERT_TRUE(index.open("/library.clx"));
+  ASSERT_EQ(index.listCount(), LISTS);
+
+  library::ClixListDesc tags{};
+  ASSERT_TRUE(index.readList(3, tags));
+  std::string label;
+  ASSERT_TRUE(index.readListLabel(tags, label));
+  EXPECT_EQ(label, "Tags");
+  EXPECT_EQ(index.entryAt(3, tags, 0, false), 4);
+  EXPECT_EQ(index.entryAt(3, tags, 0, true), 5);
+  EXPECT_EQ(index.entryAt(3, tags, 2, false), 0xFFFF);
+
+  library::ClixListDesc fiction{};
+  ASSERT_TRUE(index.readList(4, fiction));
+  ASSERT_TRUE(index.readListLabel(fiction, label));
+  EXPECT_EQ(label, "Fiction");
+  EXPECT_EQ(index.entryAt(4, fiction, 0, false), 2);
+  EXPECT_EQ(index.entryAt(4, fiction, 1, false), 0);
+  EXPECT_EQ(index.entryAt(4, fiction, 0, true), 0);
+
+  library::ClixListDesc loop{};
+  ASSERT_TRUE(index.readList(6, loop));
+  EXPECT_EQ(index.entryAt(6, loop, 0, false), 0xFFFF) << "a Groups entry naming an earlier list is a cycle";
+
+  library::ClixListDesc builtin{};
+  ASSERT_TRUE(index.readList(library::CLIX_TITLE_LIST, builtin));
+  ASSERT_TRUE(index.readListLabel(builtin, label));
+  EXPECT_TRUE(label.empty());
+  EXPECT_EQ(index.entryAt(library::CLIX_TITLE_LIST, builtin, 2, false), 2);
+  EXPECT_FALSE(index.readList(LISTS, builtin));
+}
+
+TEST(LibraryIndexFile, RejectsExternalListsThatOverrunTheSection) {
+  Image image = makeImage(2, 0, 0, {}, {}, 4, 8);
+  const uint32_t base = image.externalStart();
+  image.setList(
+      3, {library::CLIX_LIST_BOOKS, library::CLIX_ROLE_EXTERNAL, library::CLIX_LIST_TOP_LEVEL, 0, 5, 0, base, 0});
+  Storage.setFile("/library.clx", std::move(image.bytes));
+
+  library::LibraryIndexFile index;
+  ASSERT_TRUE(index.open("/library.clx")) << "only the built-in lists gate opening";
+  library::ClixListDesc list{};
+  EXPECT_FALSE(index.readList(3, list));
+}
+
+TEST(LibraryIndexFile, ReadsPathHashAndEveryPublicBlobField) {
   const uint8_t folder[] = {6, '/', 'b', 'o', 'o', 'k', 's'};
   constexpr uint64_t PATH_HASH = 0x0123456789ABCDEFULL;
   const auto blob = makeBlob(PATH_HASH, {'x', 1, 'a', 1, 't', 8, 'O', 'r', 'i', 'g', 'i', 'n', 'a', 'l'});
+  Image image = makeImage(1, sizeof(folder), blob.size());
+  auto& header = image.header;
   header.folderCount = 1;
-  library::layoutSections(header, sizeof(folder), blob.size());
-  std::vector<uint8_t> bytes(header.selfSize, 0);
+  auto& bytes = image.bytes;
   std::memcpy(bytes.data(), &header, sizeof(header));
   std::memcpy(bytes.data() + header.folderStart, folder, sizeof(folder));
   std::memcpy(bytes.data() + header.nameStart, blob.data(), blob.size());
@@ -178,15 +289,7 @@ TEST(LibraryIndexFile, ReadsPathHashAndEveryPublicBlobField) {
 }
 
 TEST(LibraryIndexFile, RejectsTruncatedAndOverflowingPathHashes) {
-  library::ClixHeader header{};
-  std::memcpy(header.magic, library::CLIX_MAGIC, sizeof(header.magic));
-  header.formatVersion = library::CLIX_FORMAT_VERSION;
-  header.foldVersion = library::CLIX_FOLD_VERSION;
-  header.bookCount = 1;
-  library::layoutSections(header, 0, sizeof(uint64_t) - 1);
-  std::vector<uint8_t> bytes(header.selfSize, 0);
-  std::memcpy(bytes.data(), &header, sizeof(header));
-  Storage.setFile("/library.clx", std::move(bytes));
+  Storage.setFile("/library.clx", makeImage(1, 0, sizeof(uint64_t) - 1).bytes);
 
   library::LibraryIndexFile index;
   ASSERT_TRUE(index.open("/library.clx"));
@@ -201,16 +304,11 @@ TEST(LibraryIndexFile, RejectsTruncatedAndOverflowingPathHashes) {
 }
 
 TEST(LibraryIndexFile, RejectsFolderRecordBeyondFolderBlob) {
-  library::ClixHeader header{};
-  std::memcpy(header.magic, library::CLIX_MAGIC, sizeof(header.magic));
-  header.formatVersion = library::CLIX_FORMAT_VERSION;
-  header.foldVersion = library::CLIX_FOLD_VERSION;
-  header.bookCount = 1;
   const uint8_t folder[] = {5, '/'};
   const auto blob = makeBlob(1, {'x', 0, 0, 0});
-  library::layoutSections(header, sizeof(folder), blob.size());
-  std::vector<uint8_t> bytes(header.selfSize, 0);
-  std::memcpy(bytes.data(), &header, sizeof(header));
+  Image image = makeImage(1, sizeof(folder), blob.size());
+  const auto& header = image.header;
+  auto& bytes = image.bytes;
   std::memcpy(bytes.data() + header.folderStart, folder, sizeof(folder));
   std::memcpy(bytes.data() + header.nameStart, blob.data(), blob.size());
   library::ClixRecord record{};
