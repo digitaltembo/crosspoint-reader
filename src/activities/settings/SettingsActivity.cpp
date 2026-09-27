@@ -23,6 +23,7 @@
 #include "KOReaderSettingsActivity.h"
 #include "KeyboardLayoutsActivity.h"
 #include "LanguageSelectActivity.h"
+#include "LibrarySettingsActivity.h"
 #include "MappedInputManager.h"
 #include "OpdsServerListActivity.h"
 #include "OtaUpdateActivity.h"
@@ -95,6 +96,7 @@ void SettingsActivity::rebuildSettingsLists() {
     controlsSettings.insert(controlsSettings.begin(),
                             SettingInfo::Action(StrId::STR_HOME_BUTTON, SettingAction::HomeButton));
   }
+  systemSettings.push_back(SettingInfo::Action(StrId::STR_LIBRARY_SETTINGS, SettingAction::LibrarySettings));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_WIFI_NETWORKS, SettingAction::Network));
   // Clock configuration only exists where the RTC probe found hardware; on
   // clockless boards there is nothing to set.
@@ -353,6 +355,16 @@ void SettingsActivity::toggleCurrentSetting() {
         startActivityForResult(std::move(activity), [this](const ActivityResult&) { requestUpdate(); });
         return;
       }
+      case SettingAction::LibrarySettings: {
+        auto activity = makeUniqueNoThrow<LibrarySettingsActivity>(renderer, mappedInput);
+        if (!activity) {
+          LOG_ERR("SET", "OOM: Library settings");
+          return;
+        }
+        // LibrarySettingsActivity saves on exit when something changed.
+        startActivityForResult(std::move(activity), [this](const ActivityResult&) { requestUpdate(); });
+        return;
+      }
       case SettingAction::RemapFrontButtons:
         startActivityForResult(std::make_unique<ButtonRemapActivity>(renderer, mappedInput), resultHandler);
         break;
@@ -497,7 +509,9 @@ void SettingsActivity::openSleepTimeoutPicker() {
 }
 
 std::string SettingsActivity::settingValueText(const SettingInfo& setting) {
-  if (setting.action == SettingAction::HomeButton) return tr(STR_CONFIGURE);
+  if (setting.action == SettingAction::HomeButton || setting.action == SettingAction::LibrarySettings) {
+    return tr(STR_CONFIGURE);
+  }
   if (setting.type == SettingType::TOGGLE && setting.valuePtr != nullptr) {
     return SETTINGS.*(setting.valuePtr) ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
   }
