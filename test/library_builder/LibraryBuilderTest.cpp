@@ -62,6 +62,101 @@ uint16_t firstSeenOf(LibraryIndexFile& index, const std::string& path) {
   return 0xFFFF;
 }
 
+uint16_t ordinalOf(LibraryIndexFile& index, const std::string& path) {
+  for (uint16_t ordinal = 0; ordinal < index.bookCount(); ordinal++) {
+    ClixRecord record{};
+    std::string recordPath;
+    if (index.readRecord(ordinal, record) && index.readPath(record, recordPath) && recordPath == path) return ordinal;
+  }
+  return 0xFFFF;
+}
+
+// What an external tool adds. Books entries are paths; Groups entries are list
+// ids.
+struct ExternalList {
+  uint8_t kind;
+  uint8_t flags;
+  std::string label;
+  std::vector<std::string> books;
+  std::vector<uint16_t> children;
+};
+
+// The live index with `lists` appended after the built-in ones, written the way
+// an external tool would: same folders, records and names, a longer list
+// section.
+std::vector<uint8_t> withExternalLists(const std::vector<ExternalList>& lists) {
+  const std::vector<uint8_t>& current = fake::files["/.crosspoint/library.idx"]->bytes;
+  LibraryIndexFile index;
+  EXPECT_TRUE(index.open("/.crosspoint/library.idx"));
+  ClixHeader from{};
+  std::memcpy(&from, current.data(), sizeof(from));
+  const uint16_t n = from.bookCount;
+  const uint16_t listCount = static_cast<uint16_t>(CLIX_BUILTIN_LISTS + lists.size());
+
+  std::vector<uint16_t> builtinEntries(2u * n);
+  ClixListDesc builtins[CLIX_BUILTIN_LISTS];
+  std::memcpy(builtins, current.data() + from.listStart, sizeof(builtins));
+  std::memcpy(builtinEntries.data(), current.data() + from.listStart + builtins[CLIX_RECENT_LIST].entriesOff,
+              n * sizeof(uint16_t));
+  std::memcpy(builtinEntries.data() + n, current.data() + from.listStart + builtins[CLIX_AUTHOR_LIST].entriesOff,
+              n * sizeof(uint16_t));
+
+  std::vector<ClixListDesc> table(listCount);
+  builtinListDescs(table.data(), n, listCount);
+  std::vector<uint16_t> entries;
+  std::string labels;
+  const uint32_t entriesStart = listCount * sizeof(ClixListDesc) + builtinListEntryBytes(n);
+  for (size_t i = 0; i < lists.size(); i++) {
+    std::vector<uint16_t> values = lists[i].children;
+    for (const auto& path : lists[i].books) values.push_back(ordinalOf(index, path));
+    table[CLIX_BUILTIN_LISTS + i] = {lists[i].kind,
+                                     CLIX_ROLE_EXTERNAL,
+                                     lists[i].flags,
+                                     static_cast<uint8_t>(lists[i].label.size()),
+                                     static_cast<uint16_t>(values.size()),
+                                     0,
+                                     static_cast<uint32_t>(entriesStart + entries.size() * sizeof(uint16_t)),
+                                     static_cast<uint32_t>(labels.size())};
+    entries.insert(entries.end(), values.begin(), values.end());
+    labels += lists[i].label;
+  }
+  const uint32_t labelsStart = entriesStart + static_cast<uint32_t>(entries.size() * sizeof(uint16_t));
+  for (size_t i = 0; i < lists.size(); i++) table[CLIX_BUILTIN_LISTS + i].labelOff += labelsStart;
+
+  ClixHeader to = from;
+  to.listCount = listCount;
+  layoutSections(to, from.folderLen, labelsStart + static_cast<uint32_t>(labels.size()), from.nameLen);
+  std::vector<uint8_t> bytes(to.selfSize, 0);
+  std::memcpy(bytes.data(), &to, sizeof(to));
+  std::copy_n(current.begin() + from.folderStart, from.listStart - from.folderStart, bytes.begin() + to.folderStart);
+  uint8_t* section = bytes.data() + to.listStart;
+  std::memcpy(section, table.data(), table.size() * sizeof(ClixListDesc));
+  std::memcpy(section + table[CLIX_RECENT_LIST].entriesOff, builtinEntries.data(), builtinEntries.size() * 2);
+  std::memcpy(section + entriesStart, entries.data(), entries.size() * sizeof(uint16_t));
+  std::memcpy(section + labelsStart, labels.data(), labels.size());
+  std::copy_n(current.begin() + from.nameStart, from.nameLen, bytes.begin() + to.nameStart);
+  return bytes;
+}
+
+// A Books list's paths, or a Groups list's child ids as strings.
+std::vector<std::string> listContents(LibraryIndexFile& index, const uint16_t id, std::string* label = nullptr) {
+  std::vector<std::string> out;
+  ClixListDesc list{};
+  if (!index.readList(id, list)) return {"<invalid>"};
+  if (label) index.readListLabel(list, *label);
+  for (uint16_t row = 0; row < list.entryCount; row++) {
+    const uint16_t entry = index.entryAt(id, list, row, false);
+    if (list.kind == CLIX_LIST_GROUPS) {
+      out.push_back(std::to_string(entry));
+      continue;
+    }
+    ClixRecord record{};
+    std::string path;
+    out.push_back(index.readRecord(entry, record) && index.readPath(record, path) ? path : "<bad>");
+  }
+  return out;
+}
+
 class LibraryBuilderTest : public ::testing::Test {
  protected:
   BuildStats stats;
@@ -601,4 +696,125 @@ TEST_F(LibraryBuilderTest, BlobFieldsLongerThanTheFirstReadChunkAreReadWhole) {
   ASSERT_TRUE(index.readAuthorAndTitle(record, author, title));
   EXPECT_EQ(author, longAuthor);
   EXPECT_EQ(title, longTitle);
+}
+
+TEST_F(LibraryBuilderTest, ExternalListsLoseRemovedBooksFollowRenamesAndDropEmptiedGroups) {
+  fake::reset();
+  // Distinct sizes, so the rename below is recognised by size.
+  fake::add("/a.epub", "a");
+  fake::add("/b.epub", "bb");
+  fake::add("/c.epub", "ccc");
+  fake::add("/d.epub", "dddd");
+  bookMetadata["/a.epub"].title = "Alpha";
+  bookMetadata["/b.epub"].title = "Bravo";
+  bookMetadata["/c.epub"].title = "Charlie";
+  bookMetadata["/d.epub"].title = "Delta";
+  initial();
+  fake::files[INDEX]->bytes = withExternalLists({
+      {CLIX_LIST_GROUPS, CLIX_LIST_TOP_LEVEL, "Tags", {}, {4, 5}},
+      {CLIX_LIST_BOOKS, 0, "Fiction", {"/d.epub", "/a.epub", "/c.epub"}, {}},
+      {CLIX_LIST_BOOKS, 0, "Poetry", {"/b.epub"}, {}},
+  });
+
+  ASSERT_TRUE(Storage.remove("/b.epub"));
+  ASSERT_TRUE(Storage.rename("/c.epub", "/z.epub"));
+  bookMetadata["/z.epub"].title = "Zulu";  // moves the renamed book to the last record
+  fake::add("/e.epub", "eeeee");
+  bookMetadata["/e.epub"].title = "Echo";
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_TRUE(stats.indexReplaced);
+  EXPECT_FALSE(stats.listsDropped);
+  EXPECT_EQ(stats.renamed, 1);
+  EXPECT_EQ(stats.removed, 1);
+
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  ASSERT_EQ(index.listCount(), 6);
+  EXPECT_EQ(index.header().flags & CLIX_FLAG_LISTS_DROPPED, 0);
+  std::string label;
+  EXPECT_EQ(listContents(index, 3, &label), std::vector<std::string>{"4"}) << "Poetry lost its only book";
+  EXPECT_EQ(label, "Tags");
+  EXPECT_EQ(listContents(index, 4, &label), (std::vector<std::string>{"/d.epub", "/a.epub", "/z.epub"}));
+  EXPECT_EQ(label, "Fiction");
+  EXPECT_TRUE(listContents(index, 5, &label).empty());
+  EXPECT_EQ(label, "Poetry");
+  ClixListDesc tags{};
+  ASSERT_TRUE(index.readList(3, tags));
+  EXPECT_NE(tags.flags & CLIX_LIST_TOP_LEVEL, 0);
+  // The built-in lists still name every book, the new one included.
+  EXPECT_EQ(pathAt(index, SortOrder::TitleAsc, 3), "/z.epub");
+  EXPECT_EQ(pathAt(index, SortOrder::RecentDesc, 0), "/e.epub");
+}
+
+TEST_F(LibraryBuilderTest, UnchangedRebuildKeepsExternalListsByteForByte) {
+  bookMetadata["/a.epub"].title = "Alpha";
+  bookMetadata["/b.epub"].title = "Bravo";
+  initial();
+  fake::files[INDEX]->bytes =
+      withExternalLists({{CLIX_LIST_BOOKS, CLIX_LIST_TOP_LEVEL, "Favourites", {"/b.epub"}, {}}});
+  const auto withLists = fake::files[INDEX]->bytes;
+
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_FALSE(stats.indexReplaced);
+  EXPECT_EQ(fake::files[INDEX]->bytes, withLists);
+
+  fake::add("/c.epub");
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_TRUE(stats.indexReplaced);
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  EXPECT_EQ(listContents(index, 3), std::vector<std::string>{"/b.epub"});
+}
+
+TEST_F(LibraryBuilderTest, MalformedExternalListIsCarriedBackEmpty) {
+  bookMetadata["/a.epub"].title = "Alpha";
+  bookMetadata["/b.epub"].title = "Bravo";
+  initial();
+  auto bytes = withExternalLists({{CLIX_LIST_BOOKS, CLIX_LIST_TOP_LEVEL, "Broken", {"/a.epub"}, {}},
+                                  {CLIX_LIST_BOOKS, CLIX_LIST_TOP_LEVEL, "Kept", {"/b.epub"}, {}}});
+  ClixHeader header{};
+  std::memcpy(&header, bytes.data(), sizeof(header));
+  const uint16_t overrun = 0xFFFF;
+  std::memcpy(bytes.data() + header.listStart + 3 * sizeof(ClixListDesc) + offsetof(ClixListDesc, entryCount), &overrun,
+              sizeof(overrun));
+  fake::files[INDEX]->bytes = bytes;
+  fake::add("/c.epub");
+
+  ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+  EXPECT_FALSE(stats.listsDropped);
+  LibraryIndexFile index;
+  ASSERT_TRUE(index.open(INDEX));
+  ASSERT_EQ(index.listCount(), 5);
+  EXPECT_TRUE(listContents(index, 3).empty());
+  EXPECT_EQ(listContents(index, 4), std::vector<std::string>{"/b.epub"});
+}
+
+TEST_F(LibraryBuilderTest, ExternalListsThatCannotBeCarriedAreDroppedWithoutFailingTheBuild) {
+  initial();
+  const auto withLists = withExternalLists({{CLIX_LIST_BOOKS, CLIX_LIST_TOP_LEVEL, "Favourites", {"/a.epub"}, {}}});
+
+  // Fail each allocation in turn: the build either fails and keeps the old
+  // index, succeeds with the lists, or succeeds without them and says so.
+  bool dropped = false;
+  for (int k = 0; k < 64 && !dropped; k++) {
+    fake::files[INDEX]->bytes = withLists;
+    fake::files["/a.epub"]->time = 10 + k;  // a real rebuild every time
+    fake::failureTriggered = false;
+    fake::failAlloc = k;
+    const bool ok = buildLibraryIndex("/", stats, true);
+    fake::failAlloc = -1;
+    if (!fake::failureTriggered) break;
+    if (!ok) {
+      EXPECT_EQ(fake::files[INDEX]->bytes, withLists) << k;
+      continue;
+    }
+    if (!stats.listsDropped) continue;
+    dropped = true;
+    LibraryIndexFile index;
+    ASSERT_TRUE(index.open(INDEX)) << k;
+    EXPECT_EQ(index.listCount(), CLIX_BUILTIN_LISTS);
+    EXPECT_NE(index.header().flags & CLIX_FLAG_LISTS_DROPPED, 0);
+    EXPECT_EQ(index.bookCount(), 2);
+  }
+  EXPECT_TRUE(dropped);
 }

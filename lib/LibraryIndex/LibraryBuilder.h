@@ -18,6 +18,9 @@
 //     whose names enumerate but whose contents cannot be opened.
 //   * Install is write-then-rename, so an interrupted build leaves the previous
 //     index untouched rather than a half-written one.
+//   * Lists written by external tools are carried over: each keeps its order,
+//     loses the books that are gone, and follows renamed books. Books added
+//     since the tool last ran are not in them.
 
 #include <cstdint>
 #include <string>
@@ -55,6 +58,8 @@ struct BuildStats {
   bool indexReplaced = false;
   bool ranksDegraded = false;
   bool dedupDegraded = false;
+  // The previous index held external lists and this build could not carry them.
+  bool listsDropped = false;
 };
 
 // Walk `rootPath`, write `/.crosspoint/library.idx`, and report what happened.
