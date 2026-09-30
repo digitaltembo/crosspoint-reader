@@ -18,6 +18,8 @@
 #include "ReaderToolbarUi.h"
 #include "components/OptionPopup.h"
 
+class DictionaryWordSelectActivity;
+
 class EpubReaderActivity final : public ReaderActivity {
   std::shared_ptr<Epub> epub;
   std::unique_ptr<Section> section = nullptr;
@@ -164,6 +166,8 @@ class EpubReaderActivity final : public ReaderActivity {
   void activateMoreRow(int row);
   void openFootnoteSelect(bool reopenMenuOnCancel);
   void openDictionaryWordSelect();
+  bool openDictionaryAtPoint(int x, int y);
+  std::unique_ptr<DictionaryWordSelectActivity> makeDictionaryWordSelect();
   bool launchKOReaderSync();
   unsigned long confirmLongPressThreshold() const;
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);

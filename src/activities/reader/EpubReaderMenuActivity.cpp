@@ -52,7 +52,9 @@ void EpubReaderMenuActivity::buildMenuItems(std::vector<MenuItem>& items, bool h
   if (Frontlight.present()) {
     items.push_back({MenuAction::FRONTLIGHT, StrId::STR_FRONTLIGHT});
   }
-  items.push_back({MenuAction::DICTIONARY, StrId::STR_LOOKUP});
+  if (!ReaderUtils::longPressWordLookupEnabled()) {
+    items.push_back({MenuAction::DICTIONARY, StrId::STR_LOOKUP});
+  }
   items.push_back({MenuAction::ROTATE_SCREEN, StrId::STR_ORIENTATION});
   items.push_back({MenuAction::AUTO_PAGE_TURN, StrId::STR_AUTO_TURN_PAGES_PER_MIN});
   items.push_back({MenuAction::GO_TO_PERCENT, StrId::STR_GO_TO_PERCENT});
