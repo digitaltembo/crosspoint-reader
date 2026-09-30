@@ -43,20 +43,35 @@ void indexBuildYield(void*) { vTaskDelay(1); }
 
 void DictionaryWordSelectActivity::onEnter() {
   Activity::onEnter();
-  fontId = SETTINGS.getReaderFontId();
-  lineHeight = renderer.getLineHeight(fontId);
   // No null check: a failed allocation just disables the differential
   // fast path (drawHighlightWithSnapshot skips the read), keeping the
   // full-repaint path as the fallback.
   snapshot = makeUniqueNoThrow<uint8_t[]>(SNAPSHOT_CAPACITY);
-  extractWords();
+  prepareWords();
   // Start on the middle row's word nearest mid-screen instead of top-left:
   // any word on the page is then at most half a page of moves away.
-  if (!words.empty()) {
+  if (!preselected && !words.empty()) {
     const int initial = closestInRow(rowCount / 2, renderer.getScreenWidth() / 2);
     if (initial >= 0) selected = initial;
   }
   requestUpdate();
+}
+
+bool DictionaryWordSelectActivity::selectWordAt(const int x, const int y) {
+  prepareWords();
+  const int hit = wordAt(x, y);
+  if (hit < 0) return false;
+  selected = hit;
+  preselected = true;
+  return true;
+}
+
+void DictionaryWordSelectActivity::prepareWords() {
+  if (wordsReady) return;
+  wordsReady = true;
+  fontId = SETTINGS.getReaderFontId();
+  lineHeight = renderer.getLineHeight(fontId);
+  extractWords();
 }
 
 void DictionaryWordSelectActivity::extractWords() {
@@ -249,11 +264,11 @@ void DictionaryWordSelectActivity::loop() {
 
   if (words.empty()) return;
 
-  // Touch: a touch-down moves the highlight to the touched word (differential
-  // repaint), a tap on a word selects and looks it up in one go.
+  // Touch: the first tap (or long-press) on a word highlights it, a tap on the
+  // highlight looks it up, and a tap away from the text leaves lookup mode.
   int tx = 0;
   int ty = 0;
-  if (mappedInput.wasScreenTouchDown(tx, ty)) {
+  if (mappedInput.wasScreenLongPress(tx, ty)) {
     const int hit = wordAt(tx, ty);
     if (hit >= 0 && hit != selected) {
       selected = hit;
@@ -263,9 +278,13 @@ void DictionaryWordSelectActivity::loop() {
   }
   if (mappedInput.wasScreenTapped(tx, ty)) {
     const int hit = wordAt(tx, ty);
-    if (hit >= 0) {
-      selected = hit;
+    if (hit < 0) {
+      finish();
+    } else if (hit == selected) {
       performLookup();
+    } else {
+      selected = hit;
+      requestUpdate();
     }
     return;
   }

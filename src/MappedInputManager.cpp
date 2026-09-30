@@ -184,15 +184,22 @@ bool MappedInputManager::wasScreenTouchDown(int& x, int& y) const {
 }
 
 bool MappedInputManager::wasScreenLongPress(int& x, int& y) const {
+  if (!peekScreenLongPress(x, y)) return false;
+  // Consuming the long-press implies acting on it: suppress the rest of the
+  // contact so the finger lift can't also tap whatever the action opened.
+  suppressScreenContact();
+  return true;
+}
+
+bool MappedInputManager::peekScreenLongPress(int& x, int& y) const {
   float nx = 0.0f;
   float ny = 0.0f;
   if (!gpio.wasTouchLongPress(nx, ny)) return false;
-  // Consuming the long-press implies acting on it: suppress the rest of the
-  // contact so the finger lift can't also tap whatever the action opened.
-  gpio.suppressTouchContact();
   renderer.tapToLogical(nx, ny, x, y);
   return true;
 }
+
+void MappedInputManager::suppressScreenContact() const { gpio.suppressTouchContact(); }
 
 bool MappedInputManager::isScreenTouchHeld(int& x, int& y) const {
   // Live contact position while the finger is down (no tap-slop gate) — drag tracking.

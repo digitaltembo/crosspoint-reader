@@ -318,9 +318,26 @@ void EpubReaderActivity::openDictionaryWordSelect() {
     requestUpdate();
     return;
   }
-  if (!section) return;
+  auto activity = makeDictionaryWordSelect();
+  if (!activity) return;
+  startActivityForResult(std::move(activity), [this](const ActivityResult&) { requestUpdate(); });
+}
+
+// Long-press on a word enters lookup mode with that word highlighted. Anywhere
+// else the contact is left alone, so a long tap there still turns chapters.
+bool EpubReaderActivity::openDictionaryAtPoint(const int x, const int y) {
+  if (SETTINGS.dictionaryName[0] == '\0') return false;
+  auto activity = makeDictionaryWordSelect();
+  if (!activity || !activity->selectWordAt(x, y)) return false;
+  mappedInput.suppressScreenContact();
+  startActivityForResult(std::move(activity), [this](const ActivityResult&) { requestUpdate(); });
+  return true;
+}
+
+std::unique_ptr<DictionaryWordSelectActivity> EpubReaderActivity::makeDictionaryWordSelect() {
+  if (!section) return nullptr;
   auto page = section->loadPage(section->currentPage);
-  if (!page) return;
+  if (!page) return nullptr;
 
   int orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft;
   renderer.getOrientedViewableTRBL(&orientedMarginTop, &orientedMarginRight, &orientedMarginBottom,
@@ -328,9 +345,8 @@ void EpubReaderActivity::openDictionaryWordSelect() {
   orientedMarginTop += SETTINGS.screenMargin;
   orientedMarginLeft += SETTINGS.screenMargin;
 
-  startActivityForResult(std::make_unique<DictionaryWordSelectActivity>(renderer, mappedInput, std::move(page),
-                                                                        orientedMarginLeft, orientedMarginTop),
-                         [this](const ActivityResult&) { requestUpdate(); });
+  return std::make_unique<DictionaryWordSelectActivity>(renderer, mappedInput, std::move(page), orientedMarginLeft,
+                                                        orientedMarginTop);
 }
 
 void EpubReaderActivity::openFootnoteSelect(const bool reopenMenuOnCancel) {
@@ -536,6 +552,13 @@ void EpubReaderActivity::loop() {
     return;
   }
   const bool endOfBookMenuOpen = endOfBookMenuActive();
+
+  int pressX = 0;
+  int pressY = 0;
+  if (!endOfBookMenuOpen && !atEndOfBook && ReaderUtils::longPressWordLookupEnabled() &&
+      mappedInput.peekScreenLongPress(pressX, pressY) && openDictionaryAtPoint(pressX, pressY)) {
+    return;
+  }
 
   const unsigned long confirmHoldMs = confirmLongPressThreshold();
   // wasLongPressed() suppresses the release that follows it, so leave it unpolled while

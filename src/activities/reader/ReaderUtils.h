@@ -1,5 +1,6 @@
 #pragma once
 
+#include <BoardConfig.h>
 #include <CrossPointSettings.h>
 #include <GfxRenderer.h>
 #include <HalGPIO.h>
@@ -13,6 +14,9 @@
 #include "activities/ActivityManager.h"
 
 namespace ReaderUtils {
+
+// Long-press a word to look it up; the reader menu drops its Look Up entry.
+inline bool longPressWordLookupEnabled() { return BoardConfig::hasTouch() && SETTINGS.longPressWordLookup; }
 
 constexpr unsigned long GO_HOME_MS = 1000;
 constexpr unsigned long GO_BACK_OR_HOME_MS = GO_HOME_MS;
