@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "activities/Activity.h"
-#include "util/Dictionary.h"
+#include "util/DictionaryLookup.h"
 
 // Word selection over the current reader page: Left/Right step through words
 // in reading order, Up/Down jump rows, Confirm looks the word up and opens
@@ -95,10 +95,9 @@ class DictionaryWordSelectActivity final : public Activity {
   uint16_t rowCount = 0;
   unsigned long lastHorizontalMoveTime = 0;
 
-  Dictionary dict;
-  bool dictOpenAttempted = false;
-  bool dictOpenOk = false;
-  bool dictNeedsIndex = false;
+  // Shared with the definition viewer, which may switch it to another
+  // dictionary; prepare() reopens the configured one on the next lookup.
+  DictionaryLookup dictLookup;
 
   Popup popup = Popup::None;
   StrId popupMsg = StrId::STR_DICT_NOT_FOUND;
