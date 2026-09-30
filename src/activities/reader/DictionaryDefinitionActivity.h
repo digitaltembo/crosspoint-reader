@@ -17,19 +17,29 @@
 // through the EPUB chapter parser into styled Pages; anything else (plain
 // text, or HTML too damaged to parse) is word-wrapped once on entry and each
 // page renders spans of the original string, so no per-line copies are held.
-// With more than one dictionary installed, a tab per dictionary looks the same
-// word up in that dictionary (tap a tab, or Confirm to cycle).
+// For a dictionary lookup with more than one dictionary installed, a tab per
+// dictionary looks the same word up in that dictionary (tap a tab, or Confirm
+// to cycle).
 class DictionaryDefinitionActivity final : public Activity {
  public:
-  // `dictLookup` is the caller's open dictionary, reused (and switched) by the
-  // tabs; it must outlive this activity. `lookupWord` is the text that was
-  // looked up and `dictionaryName` the folder that produced `definition`.
+  // Plain titled text viewer (e.g. a plugin README): no dictionary tabs.
+  explicit DictionaryDefinitionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string headword,
+                                        std::string definition, bool htmlDefinition = false)
+      : Activity("DictionaryDefinition", renderer, mappedInput),
+        headword(std::move(headword)),
+        definition(std::move(definition)),
+        htmlDefinition(htmlDefinition) {}
+
+  // Dictionary lookup. `dictLookup` is the caller's open dictionary, reused
+  // (and switched) by the tabs; it must outlive this activity. `lookupWord` is
+  // the text that was looked up and `dictionaryName` the folder that produced
+  // `definition`.
   explicit DictionaryDefinitionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                         DictionaryLookup& dictLookup, std::string lookupWord,
                                         const char* dictionaryName, std::string headword, std::string definition,
                                         bool htmlDefinition = false)
       : Activity("DictionaryDefinition", renderer, mappedInput),
-        dictLookup(dictLookup),
+        dictLookup(&dictLookup),
         lookupWord(std::move(lookupWord)),
         initialDictionary(dictionaryName),
         headword(std::move(headword)),
@@ -55,7 +65,7 @@ class DictionaryDefinitionActivity final : public Activity {
     int height;
   };
 
-  bool showTabs() const { return dictionaries.size() > 1; }
+  bool showTabs() const { return dictLookup && dictionaries.size() > 1; }
   // Content column (right of a landscape hint gutter, below an inverted hint
   // bar) and the tab band inside it.
   Rect contentRect() const;
@@ -75,7 +85,8 @@ class DictionaryDefinitionActivity final : public Activity {
   void drawBody(int fontId, int x, int startY) const;
   void drawTabs(Rect rect) const;
 
-  DictionaryLookup& dictLookup;
+  // Null for the plain text viewer, which has no tabs.
+  DictionaryLookup* dictLookup = nullptr;
   // Not `word`: Arduino.h defines a word() macro.
   const std::string lookupWord;
   const std::string initialDictionary;

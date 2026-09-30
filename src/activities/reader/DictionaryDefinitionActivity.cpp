@@ -42,7 +42,7 @@ constexpr int TAB_BODY_GAP = 10;  // tab divider to the first line of the defini
 
 void DictionaryDefinitionActivity::onEnter() {
   Activity::onEnter();
-  DictionaryRegistry::discover(dictionaries);
+  if (dictLookup) DictionaryRegistry::discover(dictionaries);
   for (size_t i = 0; i < dictionaries.size(); i++) {
     if (dictionaries[i].name == initialDictionary) activeTab = static_cast<int>(i);
   }
@@ -74,7 +74,7 @@ void DictionaryDefinitionActivity::switchTab(const int index) {
   activeTab = index;
   busy = true;
   busyMessage =
-      dictLookup.prepare(dictionaries[index].name.c_str()) ? StrId::STR_DICT_INDEXING : StrId::STR_DICT_LOOKING_UP;
+      dictLookup->prepare(dictionaries[index].name.c_str()) ? StrId::STR_DICT_INDEXING : StrId::STR_DICT_LOOKING_UP;
   requestUpdateAndWait();  // paint the new tab + busy popup before blocking on SD
 
   // Drop the old definition before reading the new one so both are never
@@ -87,7 +87,7 @@ void DictionaryDefinitionActivity::switchTab(const int index) {
   std::string newDefinition;
   std::string newHeadword;
   StrId error = StrId::STR_DICT_NOT_FOUND;
-  const bool found = dictLookup.lookup(lookupWord.c_str(), newDefinition, newHeadword, error);
+  const bool found = dictLookup->lookup(lookupWord.c_str(), newDefinition, newHeadword, error);
   {
     RenderLock lock;
     busy = false;
@@ -95,7 +95,7 @@ void DictionaryDefinitionActivity::switchTab(const int index) {
     if (found) {
       headword = std::move(newHeadword);
       definition = std::move(newDefinition);
-      htmlDefinition = dictLookup.definitionsAreHtml();
+      htmlDefinition = dictLookup->definitionsAreHtml();
       layoutDefinition();
     } else {
       headword = Dictionary::cleanWord(lookupWord.c_str());
