@@ -1,14 +1,15 @@
 #pragma once
+#include <array>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include "./FileBrowserActivity.h"
 #include "RecentBooksStore.h"
 #include "activities/Activity.h"
 #include "components/CoverGridHomeUi.h"
+#include "components/themes/BaseTheme.h"
 #include "util/ButtonNavigator.h"
-
-struct Rect;
 
 class HomeActivity final : public Activity {
   std::unique_ptr<CoverGridHomeUi> coverGridUi;
@@ -32,6 +33,19 @@ class HomeActivity final : public Activity {
   int coverRectW = 0;
   int coverRectH = 0;
   std::vector<RecentBook> recentBooks;
+
+  // Card home (theme hasCardHome): recentBooks holds only the books that get
+  // a card, followed in selectorIndex order by the icon bar's CARD_MENU items.
+  bool cardHome = false;
+  CardHomeLayout cardLayout;
+  std::vector<int> cardProgress;  // read percentage per card, -1 unknown
+  // Per-card cover snapshots (a few KB each) so selection repaints restore
+  // covers instead of re-reading thumbnails from SD.
+  std::array<std::unique_ptr<uint8_t[]>, CardHomeLayout::MAX_CARDS> cardCovers;
+  std::array<size_t, CardHomeLayout::MAX_CARDS> cardCoverSizes{};
+  static constexpr HomeMenuItem CARD_MENU[CardHomeLayout::ICON_COUNT] = {
+      HomeMenuItem::SETTINGS_MENU, HomeMenuItem::FILE_TRANSFER, HomeMenuItem::LIBRARY};
+
   const HomeMenuItem initialMenuItem;
   const bool cleanInitialRefresh;
 
@@ -60,6 +74,15 @@ class HomeActivity final : public Activity {
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
     return HomeMenuItem::NONE;
   }
+  int menuIndexOf(HomeMenuItem item) const;
+  HomeMenuItem menuItemAt(int idx) const;
+
+  void renderCardHome();
+  bool handleCardHomeInput();
+  void activateSelection();
+  void drawCardCovers();
+  void freeCardCovers();
+
   void onSelectBook(const std::string& path);
   void onFileBrowserOpen();
   void onLibraryOpen();

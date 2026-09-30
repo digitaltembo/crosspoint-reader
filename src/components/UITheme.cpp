@@ -1,5 +1,6 @@
 #include "UITheme.h"
 
+#include <BoardConfig.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalGPIO.h>
@@ -16,6 +17,7 @@
 #include "components/themes/BaseTheme.h"
 #include "components/themes/lyra/Lyra3CoversTheme.h"
 #include "components/themes/lyra/LyraTheme.h"
+#include "components/themes/nolan/NolanTheme.h"
 #include "components/themes/roundedraff/RoundedRaffTheme.h"
 
 UITheme UITheme::instance;
@@ -32,12 +34,16 @@ void UITheme::reload() {
 
 bool UITheme::supportsCoverGrid() { return HalMemory::getPsramHeap().totalBytes > 0; }
 
+// Laid out and tested for the X4 Pro only.
+bool UITheme::supportsNolan() { return BoardConfig::isX4Pro(); }
+
 bool UITheme::hasCoverGridHome() { return SETTINGS.uiTheme == CrossPointSettings::COVER_GRID && supportsCoverGrid(); }
 
 void UITheme::drawCoverGridHome(CoverGridHomeUi& home) { home.renderUi(); }
 
 void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
   if (type == CrossPointSettings::COVER_GRID && !supportsCoverGrid()) type = CrossPointSettings::LYRA;
+  if (type == CrossPointSettings::NOLAN && !supportsNolan()) type = CrossPointSettings::LYRA;
 
   switch (type) {
     case CrossPointSettings::UI_THEME::CLASSIC:
@@ -68,6 +74,17 @@ void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
       currentTheme = std::make_unique<Lyra3CoversTheme>();
       currentMetrics = &Lyra3CoversMetrics::values;
       break;
+    case CrossPointSettings::UI_THEME::NOLAN: {
+      auto theme = makeUniqueNoThrow<NolanTheme>();
+      if (!theme) {
+        LOG_ERR("UI", "OOM: Nolan theme");
+        return;
+      }
+      LOG_DBG("UI", "Using Nolan theme");
+      currentTheme = std::move(theme);
+      currentMetrics = &NolanMetrics::values;
+      break;
+    }
   }
   metricsValid = false;
 }

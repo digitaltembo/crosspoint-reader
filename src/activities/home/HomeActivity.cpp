@@ -24,8 +24,49 @@
 #include "activities/plugins/PluginCatalogActivity.h"  // anyPluginInstalled()
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "util/BookProgress.h"
+
+void HomeActivity::activateSelection() {
+  if (selectorIndex < recentBooks.size()) {
+    onSelectBook(recentBooks[selectorIndex].path);
+    return;
+  }
+  switch (menuItemAt(selectorIndex - static_cast<int>(recentBooks.size()))) {
+    case HomeMenuItem::FILE_BROWSER:
+      onFileBrowserOpen();
+      break;
+    case HomeMenuItem::LIBRARY:
+      onLibraryOpen();
+      break;
+    case HomeMenuItem::PLUGINS:
+      onPluginsOpen();
+      break;
+    case HomeMenuItem::FILE_TRANSFER:
+      onFileTransferOpen();
+      break;
+    case HomeMenuItem::SETTINGS_MENU:
+      onSettingsOpen();
+      break;
+    default:
+      break;
+  }
+}
+
+int HomeActivity::menuIndexOf(const HomeMenuItem item) const {
+  if (!cardHome) return menuItemToIndex(item, hasPlugins);
+  for (int i = 0; i < CardHomeLayout::ICON_COUNT; ++i) {
+    if (CARD_MENU[i] == item) return i;
+  }
+  return 0;
+}
+
+HomeMenuItem HomeActivity::menuItemAt(const int idx) const {
+  if (!cardHome) return indexToMenuItem(idx, hasPlugins);
+  return idx >= 0 && idx < CardHomeLayout::ICON_COUNT ? CARD_MENU[idx] : HomeMenuItem::NONE;
+}
 
 int HomeActivity::getMenuItemCount() const {
+  if (cardHome) return static_cast<int>(recentBooks.size()) + CardHomeLayout::ICON_COUNT;
   int count = 4;  // File Browser, Library, File transfer, Settings
   if (!recentBooks.empty()) {
     count += recentBooks.size();
@@ -165,10 +206,13 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
   Rect popupRect;
 
   int progress = 0;
-  for (RecentBook& book : recentBooks) {
-    // The cover grid shares one slot size; generating at any other height
-    // would rescale the dithered thumb at draw time and alias badly.
-    const int thumbHeight = coverGridUi ? coverGridUi->thumbHeightFor() : coverHeight;
+  for (size_t index = 0; index < recentBooks.size(); ++index) {
+    RecentBook& book = recentBooks[index];
+    // Thumbs are generated at their slot's height; generating at any other
+    // height would rescale the dithered thumb at draw time and alias badly.
+    const int thumbHeight = coverGridUi ? coverGridUi->thumbHeightFor()
+                            : cardHome  ? cardLayout.covers[index].height
+                                        : coverHeight;
     if (coverGridUi) {
       loadGridCover(book, thumbHeight, showingLoading, popupRect);
       ++progress;
@@ -236,8 +280,17 @@ void HomeActivity::onEnter() {
     coverGridUi = makeUniqueNoThrow<CoverGridHomeUi>(renderer);
     if (!coverGridUi) LOG_ERR("HOME", "OOM: cover grid UI; using standard home");
   }
-  loadRecentBooks(coverGridUi ? CoverGridHomeUi::MAX_BOOKS : metrics.homeRecentBooksCount);
+  cardHome = !coverGridUi && GUI.hasCardHome();
+  if (cardHome) cardLayout = GUI.cardHomeLayout(renderer);
+  loadRecentBooks(coverGridUi ? CoverGridHomeUi::MAX_BOOKS
+                  : cardHome  ? cardLayout.cardCount
+                              : metrics.homeRecentBooksCount);
   hasContinueReading = !recentBooks.empty();
+  if (cardHome) {
+    cardProgress.clear();
+    cardProgress.reserve(recentBooks.size());
+    for (const auto& book : recentBooks) cardProgress.push_back(loadBookProgress(book.path));
+  }
   if (coverGridUi) {
     fillCoverGridFromLibrary();
     resolveGridCoverPaths();
@@ -245,7 +298,7 @@ void HomeActivity::onEnter() {
   }
 
   const auto base = static_cast<int>(recentBooks.size());
-  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, hasPlugins);
+  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuIndexOf(initialMenuItem);
 
   // Trigger first update
   requestUpdate();
@@ -258,6 +311,7 @@ void HomeActivity::onExit() {
 
   // Free the stored cover buffer if any
   freeCoverBuffer();
+  freeCardCovers();
 }
 
 bool HomeActivity::storeCoverBuffer() {
@@ -296,36 +350,109 @@ void HomeActivity::freeCoverBuffer() {
   coverBufferStored = false;
 }
 
+void HomeActivity::freeCardCovers() {
+  for (auto& cover : cardCovers) cover.reset();
+  cardCoverSizes.fill(0);
+}
+
+void HomeActivity::drawCardCovers() {
+  const int count = std::min(static_cast<int>(recentBooks.size()), cardLayout.cardCount);
+  for (int i = 0; i < count; ++i) {
+    const Rect& rect = cardLayout.covers[i];
+    if (cardCovers[i] &&
+        renderer.copyBufferToRegion(rect.x, rect.y, rect.width, rect.height, cardCovers[i].get(), cardCoverSizes[i])) {
+      continue;
+    }
+    const RecentBook& book = recentBooks[i];
+    const std::string thumbPath =
+        book.coverBmpPath.empty() ? std::string() : UITheme::getCoverThumbPath(book.coverBmpPath, rect.height);
+    GUI.drawCardHomeCover(renderer, rect, thumbPath);
+
+    const size_t size = renderer.getRegionByteSize(rect.x, rect.y, rect.width, rect.height);
+    if (size == 0) continue;
+    auto buffer = makeUniqueNoThrow<uint8_t[]>(size);
+    if (!buffer) {
+      LOG_ERR("HOME", "OOM: card cover (%u bytes)", static_cast<unsigned>(size));
+      continue;  // redrawn from SD next time instead
+    }
+    if (renderer.copyRegionToBuffer(rect.x, rect.y, rect.width, rect.height, buffer.get(), size)) {
+      cardCovers[i] = std::move(buffer);
+      cardCoverSizes[i] = size;
+    }
+  }
+}
+
+void HomeActivity::renderCardHome() {
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  // Status band only (battery/clock): home is the stack root, so no title or back button.
+  GUI.drawHeader(renderer,
+                 Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.homeTopPadding - metrics.topPadding},
+                 nullptr, nullptr, false);
+  GUI.drawCardHome(renderer, cardLayout, recentBooks, cardProgress.data(), selectorIndex);
+  // loadRecentCovers() clears coverRendered after generating thumbs; drop the
+  // snapshots so the new thumbs replace the placeholders.
+  if (!coverRendered) {
+    freeCardCovers();
+    coverRendered = true;
+  }
+  drawCardCovers();
+
+  const auto labels = mappedInput.mapLabels(recentBooks.empty() ? "" : tr(STR_RESUME), tr(STR_SELECT), tr(STR_DIR_UP),
+                                            tr(STR_DIR_DOWN));
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
+
+  if (!firstRenderDone) {
+    firstRenderDone = true;
+    requestUpdate();
+  } else if (!recentsLoaded && !recentsLoading) {
+    loadRecentCovers(0);  // card mode takes each slot's own height
+  }
+}
+
+bool HomeActivity::handleCardHomeInput() {
+  const int bookCount = static_cast<int>(recentBooks.size());
+  const auto hitIndex = [this, bookCount](const int x, const int y) {
+    for (int i = 0; i < bookCount; ++i) {
+      if (cardLayout.cards[i].contains(x, y)) return i;
+    }
+    for (int i = 0; i < CardHomeLayout::ICON_COUNT; ++i) {
+      if (cardLayout.icons[i].contains(x, y)) return bookCount + i;
+    }
+    return -1;
+  };
+
+  int x = 0;
+  int y = 0;
+  // Press highlights, release activates (same feedback as the list home).
+  if (mappedInput.wasScreenTouchDown(x, y)) {
+    const int hit = hitIndex(x, y);
+    if (hit >= 0) {
+      if (hit != selectorIndex) {
+        selectorIndex = hit;
+        requestUpdate();
+      }
+      return true;
+    }
+  }
+  if (mappedInput.wasScreenTapped(x, y)) {
+    const int hit = hitIndex(x, y);
+    if (hit >= 0) {
+      selectorIndex = hit;
+      activateSelection();
+      return true;
+    }
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    activateSelection();
+    return true;
+  }
+  return false;
+}
+
 void HomeActivity::loop() {
   const int menuCount = getMenuItemCount();
   const auto& metrics = UITheme::getInstance().getMetrics();
-
-  auto activateSelection = [this] {
-    if (selectorIndex < recentBooks.size()) {
-      onSelectBook(recentBooks[selectorIndex].path);
-      return;
-    }
-    const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-    switch (indexToMenuItem(menuIndex, hasPlugins)) {
-      case HomeMenuItem::FILE_BROWSER:
-        onFileBrowserOpen();
-        break;
-      case HomeMenuItem::LIBRARY:
-        onLibraryOpen();
-        break;
-      case HomeMenuItem::PLUGINS:
-        onPluginsOpen();
-        break;
-      case HomeMenuItem::FILE_TRANSFER:
-        onFileTransferOpen();
-        break;
-      case HomeMenuItem::SETTINGS_MENU:
-        onSettingsOpen();
-        break;
-      default:
-        break;
-    }
-  };
 
   // Cover grid home splits navigation by button group (see below); the flat
   // next/previous cycle is for the classic list home only.
@@ -358,6 +485,11 @@ void HomeActivity::loop() {
   // files missing from the SD card).
   if (mappedInput.wasReleased(MappedInputManager::Button::Back) && hasContinueReading && !recentBooks.empty()) {
     onSelectBook(recentBooks[0].path);
+    return;
+  }
+
+  if (cardHome) {
+    handleCardHomeInput();
     return;
   }
 
@@ -482,6 +614,10 @@ void HomeActivity::render(RenderLock&&) {
       coverGridUi->refreshCoverPaths();
       requestUpdate();
     }
+    return;
+  }
+  if (cardHome) {
+    renderCardHome();
     return;
   }
   bool bufferRestored = coverBufferStored && restoreCoverBuffer();
