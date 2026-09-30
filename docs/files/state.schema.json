@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "state.json",
+  "description": "Runtime state written by CrossPointState (src/CrossPointState.cpp) to /.crosspoint/state.json. Every key is optional; missing keys load as their defaults.",
+  "type": "object",
+  "$defs": {
+    "recentRing": {
+      "description": "Ring buffer of the last SLEEP_RECENT_COUNT (16) sleep image indices. Extra entries are ignored on load.",
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0, "maximum": 65535 },
+      "maxItems": 16
+    },
+    "ringPos": {
+      "description": "Next write slot in the ring buffer. Out-of-range values are reduced modulo 16.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 15
+    },
+    "ringFill": {
+      "description": "Number of valid ring entries. Clamped to the array length on load.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 16
+    }
+  },
+  "properties": {
+    "openEpubPath": {
+      "description": "SD path of the book open when the device last slept; empty when none.",
+      "type": "string",
+      "default": ""
+    },
+    "recentSleepImages": { "$ref": "#/$defs/recentRing" },
+    "recentSleepPos": { "$ref": "#/$defs/ringPos", "default": 0 },
+    "recentSleepFill": { "$ref": "#/$defs/ringFill", "default": 0 },
+    "recentOverlaySleepImages": { "$ref": "#/$defs/recentRing" },
+    "recentOverlaySleepPos": { "$ref": "#/$defs/ringPos", "default": 0 },
+    "recentOverlaySleepFill": { "$ref": "#/$defs/ringFill", "default": 0 },
+    "readerActivityLoadCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "default": 0
+    },
+    "lastSleepFromReader": {
+      "type": "boolean",
+      "default": false
+    },
+    "showBootScreen": {
+      "type": "boolean",
+      "default": true
+    },
+    "lastSleepImage": {
+      "description": "Legacy single last sleep image index. Read only when recentSleepFill is 0, then pushed into recentSleepImages; 255 means none.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "deprecated": true
+    }
+  }
+}

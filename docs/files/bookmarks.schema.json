@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Bookmarks file",
+  "description": "Per-book bookmarks, written by BookmarkFile (src/util/BookmarkFile.cpp) to /.crosspoint/bookmarks/<name>.json, where <name> is the book path without its leading slash and extension, with '/' and '\\' replaced by '_'.",
+  "type": "object",
+  "properties": {
+    "bookmarks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "xpath": {
+            "description": "XPath-like position string (KOReader-compatible).",
+            "type": "string"
+          },
+          "percentage": {
+            "description": "Progress through the whole book.",
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "summary": {
+            "description": "First words of the bookmarked page, whitespace-collapsed and truncated to 72 bytes.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Optional user label, at most 128 bytes (longer names are truncated on load and rejected on save). Omitted when empty.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "si": {
+            "description": "Spine index at the time of bookmarking.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "pc": {
+            "description": "Page count of the chapter at the time of bookmarking.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "pp": {
+            "description": "Page index within the chapter at the time of bookmarking.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "vo": {
+            "description": "Visible-codepoint offset of the page within its spine item; unaffected by re-pagination. Absent on bookmarks created before it existed.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          }
+        },
+        "required": ["xpath", "percentage", "summary", "si", "pc", "pp"]
+      }
+    }
+  },
+  "required": ["bookmarks"]
+}

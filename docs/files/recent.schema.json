@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "recent.json",
+  "description": "Recently opened books, written by RecentBooksStore (src/RecentBooksStore.cpp) to /.crosspoint/recent.json. A missing or non-array 'books' key loads as an empty list.",
+  "type": "object",
+  "properties": {
+    "books": {
+      "description": "Most recent first. Entries past MAX_RECENT_BOOKS (10) are ignored on load.",
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "description": "Absolute SD path of the book file; identifies the entry.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Book title; empty until the book's metadata has been cached.",
+            "type": "string"
+          },
+          "author": {
+            "type": "string"
+          },
+          "coverBmpPath": {
+            "description": "SD path of the cached cover thumbnail, usually under /.crosspoint/<book cache>/; empty when none.",
+            "type": "string"
+          }
+        },
+        "required": ["path", "title", "author", "coverBmpPath"]
+      }
+    }
+  },
+  "required": ["books"]
+}

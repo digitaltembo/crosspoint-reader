@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "wifi.json",
+  "description": "Saved WiFi networks, written by WifiCredentialStore (src/WifiCredentialStore.cpp) to /.crosspoint/wifi.json. Files missing the password integrity fields, or holding a legacy plaintext password, are accepted and rewritten in the current shape.",
+  "type": "object",
+  "properties": {
+    "lastConnectedSsid": {
+      "description": "SSID of the most recently connected network; empty when none.",
+      "type": "string"
+    },
+    "credentials": {
+      "description": "Entries past MAX_NETWORKS (8) are ignored on load.",
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "properties": {
+          "ssid": {
+            "type": "string"
+          },
+          "password_obf": {
+            "description": "Password XORed with a key derived from the device MAC address, then base64-encoded. Only decodable on the device that wrote it.",
+            "type": "string",
+            "contentEncoding": "base64"
+          },
+          "password_len": {
+            "description": "Decoded password length in bytes. A mismatch after decoding discards the entry.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 64
+          },
+          "password_crc32": {
+            "description": "CRC-32 of the decoded password. A mismatch discards the entry.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "password": {
+            "description": "Legacy plaintext password, read only when password_obf is absent or undecodable.",
+            "type": "string",
+            "maxLength": 64,
+            "deprecated": true
+          }
+        },
+        "required": ["ssid", "password_obf", "password_len", "password_crc32"]
+      }
+    }
+  },
+  "required": ["lastConnectedSsid", "credentials"]
+}
