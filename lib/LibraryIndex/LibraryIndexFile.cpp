@@ -32,10 +32,24 @@ bool LibraryIndexFile::openImpl(const char* path, const bool acceptStaleFold) {
     return false;
   }
 
-  lastValidity =
-      acceptStaleFold ? validateHeaderStructure(head, file.fileSize64()) : validateHeader(head, file.fileSize64());
+  lastValidity = acceptStaleFold ? validateHeaderStructure(head, file.fileSize64(), true)
+                                 : validateHeader(head, file.fileSize64());
+  previousFormat = lastValidity == ClixValidity::Ok && head.formatVersion != CLIX_FORMAT_VERSION;
+  if (lastValidity == ClixValidity::Ok && !previousFormat) {
+    // The table starts with the built-in lists, so one read covers all three.
+    opened = true;
+    if (!readAt(head.listStart, builtins, sizeof(builtins))) {
+      lastValidity = ClixValidity::SizeMismatch;
+    } else {
+      for (uint16_t id = 0; id < CLIX_BUILTIN_LISTS; id++) {
+        if (!validateListDesc(head, id, builtins[id])) lastValidity = ClixValidity::ListsInconsistent;
+      }
+    }
+    opened = false;
+  }
   if (lastValidity != ClixValidity::Ok) {
     LOG_INF("LIBIDX", "index rejected: %s", clixValidityName(lastValidity));
+    memset(builtins, 0, sizeof(builtins));
     file.close();
     return false;
   }
@@ -46,6 +60,8 @@ bool LibraryIndexFile::openImpl(const char* path, const bool acceptStaleFold) {
 void LibraryIndexFile::close() {
   if (file.isOpen()) file.close();
   opened = false;
+  previousFormat = false;
+  memset(builtins, 0, sizeof(builtins));
 }
 
 bool LibraryIndexFile::readAt(const uint32_t offset, void* dst, const size_t len) {
@@ -61,33 +77,66 @@ bool LibraryIndexFile::readAt(const uint32_t offset, void* dst, const size_t len
 }
 
 uint16_t LibraryIndexFile::ordinalForRow(const SortOrder order, const uint16_t row) {
-  constexpr uint16_t NONE = 0xFFFF;
-  if (!opened || row >= head.bookCount) return NONE;
-
   switch (order) {
     case SortOrder::TitleAsc:
-      // The record section IS in title order, so this costs no storage and no
-      // read at all.
-      return row;
     case SortOrder::TitleDesc:
-      return static_cast<uint16_t>(head.bookCount - 1 - row);
+      return entryAt(CLIX_TITLE_LIST, builtins[CLIX_TITLE_LIST], row, order == SortOrder::TitleDesc);
     case SortOrder::AuthorAsc:
-    case SortOrder::AuthorDesc: {
-      const uint16_t k = order == SortOrder::AuthorAsc ? row : static_cast<uint16_t>(head.bookCount - 1 - row);
-      uint16_t ordinal = NONE;
-      return readAt(authorOrderOffset(head, k), &ordinal, sizeof(ordinal)) && ordinal < head.bookCount ? ordinal : NONE;
-    }
+    case SortOrder::AuthorDesc:
+      return entryAt(CLIX_AUTHOR_LIST, builtins[CLIX_AUTHOR_LIST], row, order == SortOrder::AuthorDesc);
     case SortOrder::RecentAsc:
-    case SortOrder::RecentDesc: {
-      // arrivalOrder runs oldest first, so both directions share one on-disk
-      // permutation.
-      const uint16_t k = order == SortOrder::RecentAsc ? row : static_cast<uint16_t>(head.bookCount - 1 - row);
-      uint16_t ordinal = NONE;
-      return readAt(arrivalOrderOffset(head, k), &ordinal, sizeof(ordinal)) && ordinal < head.bookCount ? ordinal
-                                                                                                        : NONE;
-    }
+    case SortOrder::RecentDesc:
+      // Recent runs oldest first, so both directions share one stored list.
+      return entryAt(CLIX_RECENT_LIST, builtins[CLIX_RECENT_LIST], row, order == SortOrder::RecentDesc);
   }
-  return NONE;
+  return 0xFFFF;
+}
+
+bool LibraryIndexFile::readList(const uint16_t id, ClixListDesc& out) {
+  if (id >= listCount()) return false;
+  if (id < CLIX_BUILTIN_LISTS) {
+    out = builtins[id];
+    return true;
+  }
+  if (!readAt(head.listStart + static_cast<uint32_t>(id) * sizeof(ClixListDesc), &out, sizeof(out))) return false;
+  return validateListDesc(head, id, out);
+}
+
+uint16_t LibraryIndexFile::entryAt(const uint16_t listId, const ClixListDesc& list, const uint16_t row,
+                                   const bool descending) {
+  constexpr uint16_t NONE = 0xFFFF;
+  if (listId >= listCount() || row >= list.entryCount) return NONE;
+  const uint16_t k = descending ? static_cast<uint16_t>(list.entryCount - 1 - row) : row;
+  // The record section IS in title order, so an identity list costs no storage
+  // and no read at all.
+  if (list.kind == CLIX_LIST_IDENTITY) return k < head.bookCount ? k : NONE;
+  uint16_t entry = NONE;
+  if (!readListEntries(list, k, 1, &entry)) return NONE;
+  if (list.kind == CLIX_LIST_BOOKS) return entry < head.bookCount ? entry : NONE;
+  if (list.kind == CLIX_LIST_MIXED) {
+    if ((entry & CLIX_ENTRY_LIST_BIT) == 0) return entry < head.bookCount ? entry : NONE;
+    const uint16_t child = entry & static_cast<uint16_t>(~CLIX_ENTRY_LIST_BIT);
+    return child > listId && child < head.listCount ? entry : NONE;
+  }
+  return entry > listId && entry < head.listCount ? entry : NONE;
+}
+
+bool LibraryIndexFile::readListEntries(const ClixListDesc& list, const uint16_t first, const uint16_t count,
+                                       uint16_t* out) {
+  if (list.kind == CLIX_LIST_IDENTITY || first > list.entryCount || count > list.entryCount - first) return false;
+  return count == 0 || readAt(head.listStart + list.entriesOff + static_cast<uint32_t>(first) * sizeof(uint16_t), out,
+                              static_cast<size_t>(count) * sizeof(uint16_t));
+}
+
+bool LibraryIndexFile::readListLabel(const ClixListDesc& list, std::string& out) {
+  out.clear();
+  if (list.labelLen == 0) return opened;
+  out.resize(list.labelLen);
+  if (!readAt(head.listStart + list.labelOff, out.data(), list.labelLen)) {
+    out.clear();
+    return false;
+  }
+  return true;
 }
 
 bool LibraryIndexFile::recentRowsFor(const BookIdentity* books, const size_t count, uint16_t* outRows) {
@@ -135,11 +184,11 @@ bool LibraryIndexFile::recentRowsFor(const BookIdentity* books, const size_t cou
     }
   }
 
-  // Pass 2: arrival permutation, translating matched ordinals to ascending
-  // rows.
-  for (uint16_t base = 0; base < head.bookCount && unresolved < count; base += CHUNK_RECORDS * 2) {
-    const uint16_t batch = std::min<uint16_t>(CHUNK_RECORDS * 2, head.bookCount - base);
-    if (!readAt(arrivalOrderOffset(head, base), chunk.get(), batch * sizeof(uint16_t))) return false;
+  // Pass 2: the Recent list, translating matched ordinals to ascending rows.
+  const ClixListDesc& recent = builtins[CLIX_RECENT_LIST];
+  for (uint16_t base = 0; base < recent.entryCount && unresolved < count; base += CHUNK_RECORDS * 2) {
+    const uint16_t batch = std::min<uint16_t>(CHUNK_RECORDS * 2, recent.entryCount - base);
+    if (!readListEntries(recent, base, batch, reinterpret_cast<uint16_t*>(chunk.get()))) return false;
     for (uint16_t k = 0; k < batch; k++) {
       uint16_t ordinal;
       memcpy(&ordinal, chunk.get() + k * sizeof(uint16_t), sizeof(uint16_t));
@@ -229,6 +278,95 @@ bool LibraryIndexFile::readTitle(const ClixRecord& record, std::string& out) {
 
 bool LibraryIndexFile::readSourceAuthor(const ClixRecord& record, std::string& out) {
   return readBlobField(record, 2, out);
+}
+
+bool LibraryIndexFile::readAuthorSort(const ClixRecord& record, std::string& out) {
+  return readBlobField(record, 3, out);
+}
+
+bool LibraryIndexFile::readBlobFields(const ClixRecord& record, const uint8_t fieldCount, std::string& buf,
+                                      uint32_t* offsets, uint8_t* lengths) {
+  buf.clear();
+  if (!opened || record.nameLen == 0) return false;
+  if (record.nameOff > head.nameLen || sizeof(uint64_t) > head.nameLen - record.nameOff ||
+      record.nameLen > head.nameLen - record.nameOff - sizeof(uint64_t))
+    return false;
+
+  // One read instead of one per length byte. It starts small because the card
+  // is read in 512-byte sectors: typical fields fit in the first chunk, and
+  // reading the largest possible run (up to 1 KiB) would pull in sectors of
+  // other books' blobs. A field that runs past the chunk extends the read once.
+  constexpr uint32_t FIRST_CHUNK = 128;
+  const uint32_t start = record.nameOff + sizeof(uint64_t) + record.nameLen;
+  if (start >= head.nameLen) return false;
+  const uint32_t limit = std::min<uint32_t>(head.nameLen - start, fieldCount * (1u + UINT8_MAX));
+  uint32_t have = std::min(limit, FIRST_CHUNK);
+  buf.resize(have);
+  if (!readAt(head.nameStart + start, buf.data(), have)) {
+    buf.clear();
+    return false;
+  }
+
+  uint32_t at = 0;
+  for (uint8_t i = 0; i < fieldCount; i++) {
+    // Length byte plus field, rounded up to the rest of the possible run.
+    const uint32_t needed = at + 1u + (at < have ? static_cast<uint8_t>(buf[at]) : UINT8_MAX);
+    if (needed > have && have < limit) {
+      const uint32_t more = std::min(limit, std::max(needed, have + FIRST_CHUNK)) - have;
+      buf.resize(have + more);
+      if (!readAt(head.nameStart + start + have, buf.data() + have, more)) {
+        buf.clear();
+        return false;
+      }
+      have += more;
+    }
+    if (at >= have) {
+      buf.clear();
+      return false;
+    }
+    lengths[i] = static_cast<uint8_t>(buf[at]);
+    offsets[i] = at + 1;
+    at += 1u + lengths[i];
+    if (at > have) {
+      buf.clear();
+      return false;
+    }
+  }
+  return true;
+}
+
+bool LibraryIndexFile::readAuthorAndTitle(const ClixRecord& record, std::string& author, std::string& title) {
+  author.clear();
+  uint32_t offsets[2];
+  uint8_t lengths[2];
+  // `title` doubles as the read buffer; its own field is cut out of it last.
+  if (!readBlobFields(record, 2, title, offsets, lengths)) return false;
+  author.assign(title, offsets[0], lengths[0]);
+  title.erase(0, offsets[1]);
+  title.resize(lengths[1]);
+  return true;
+}
+
+bool LibraryIndexFile::readRebuildFields(const ClixRecord& record, RebuildFields& out) {
+  constexpr uint8_t FIELDS = 7;
+  uint32_t offsets[FIELDS];
+  uint8_t lengths[FIELDS];
+  // Fields: display author, title, source author, author sort, series, series
+  // index, tags. `title` doubles as the read buffer; its own field is cut out of
+  // it last.
+  std::string& buf = out.title;
+  if (!readBlobFields(record, FIELDS, buf, offsets, lengths)) {
+    out = RebuildFields{};
+    return false;
+  }
+  out.sourceAuthor.assign(buf, offsets[2], lengths[2]);
+  out.authorSort.assign(buf, offsets[3], lengths[3]);
+  out.series.assign(buf, offsets[4], lengths[4]);
+  out.seriesIndex.assign(buf, offsets[5], lengths[5]);
+  out.tags.assign(buf, offsets[6], lengths[6]);
+  buf.erase(0, offsets[1]);
+  buf.resize(lengths[1]);
+  return true;
 }
 
 bool LibraryIndexFile::readPath(const ClixRecord& record, std::string& out) {

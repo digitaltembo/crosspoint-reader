@@ -29,6 +29,7 @@ enum class SettingAction {
   Plugins,
   KeyboardLayouts,
   HomeButton,
+  LibrarySettings,
   About,
 };
 

@@ -12,7 +12,8 @@
 // Word selection over the current reader page: Left/Right step through words
 // in reading order, Up/Down jump rows, Confirm looks the word up and opens
 // DictionaryDefinitionActivity, Back returns to the reader. On touch devices a
-// touch-down moves the highlight and a tap on a word looks it up directly.
+// tap on another word moves the highlight, a tap on the highlighted word looks
+// it up, and a tap away from any word returns to the reader.
 class DictionaryWordSelectActivity final : public Activity {
  public:
   explicit DictionaryWordSelectActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -21,6 +22,10 @@ class DictionaryWordSelectActivity final : public Activity {
         page(std::move(page)),
         marginLeft(marginLeft),
         marginTop(marginTop) {}
+
+  // Pre-selects the word under a screen point (the reader's long-press) before
+  // the activity starts. False when no word is there.
+  bool selectWordAt(int x, int y);
 
   void onEnter() override;
   void loop() override;
@@ -40,6 +45,7 @@ class DictionaryWordSelectActivity final : public Activity {
 
   enum class Popup : uint8_t { None, Busy, NotFound, Error };
 
+  void prepareWords();
   void extractWords();
   int closestInRow(uint16_t row, int centerX) const;
   int wordAt(int x, int y) const;
@@ -56,6 +62,8 @@ class DictionaryWordSelectActivity final : public Activity {
 
   std::vector<WordBox> words;
   int selected = 0;
+  bool wordsReady = false;
+  bool preselected = false;
   uint16_t rowCount = 0;
   unsigned long lastHorizontalMoveTime = 0;
 

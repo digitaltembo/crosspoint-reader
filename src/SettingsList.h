@@ -325,6 +325,8 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                           "sideButtonLayout", StrId::STR_CAT_CONTROLS),
         SettingInfo::Toggle(StrId::STR_TOUCH_READER_CONTROLS, &CrossPointSettings::touchReaderControls,
                             "touchReaderControls", StrId::STR_CAT_CONTROLS),
+        SettingInfo::Toggle(StrId::STR_LONG_PRESS_WORD_LOOKUP, &CrossPointSettings::longPressWordLookup,
+                            "longPressWordLookup", StrId::STR_CAT_CONTROLS),
         SettingInfo::Enum(StrId::STR_NEXT_PAGE_GESTURE, &CrossPointSettings::pageTurnGesture,
                           {StrId::STR_TAP_AND_SWIPE, StrId::STR_TAP_ONLY, StrId::STR_SWIPE_ONLY,
                            StrId::STR_INVERTED_TAP, StrId::STR_DISABLED},
@@ -376,8 +378,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
             "sleepTimeoutMinutes", StrId::STR_CAT_SYSTEM),
         SettingInfo::Toggle(StrId::STR_SHOW_HIDDEN_FILES, &CrossPointSettings::showHiddenFiles, "showHiddenFiles",
                             StrId::STR_CAT_SYSTEM),
+        // Edited on the Library settings screen; category-less so it stays
+        // persisted and web-exposed without a second row under System.
         SettingInfo::Toggle(StrId::STR_LIBRARY_USE_METADATA, &CrossPointSettings::libraryUseMetadata,
-                            "libraryUseMetadata", StrId::STR_CAT_SYSTEM),
+                            "libraryUseMetadata", StrId::STR_NONE_OPT),
         SettingInfo::Toggle(StrId::STR_REMOVE_READ_FROM_RECENTS, &CrossPointSettings::removeReadBooksFromRecents,
                             "removeReadBooksFromRecents", StrId::STR_CAT_SYSTEM),
         SettingInfo::Toggle(StrId::STR_MOVE_FINISHED_TO_READ, &CrossPointSettings::moveFinishedToReadFolder,
@@ -511,6 +515,7 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
     v.erase(std::remove_if(v.begin(), v.end(),
                            [](const SettingInfo& s) {
                              return s.nameId == StrId::STR_TOUCH_READER_CONTROLS ||
+                                    s.nameId == StrId::STR_LONG_PRESS_WORD_LOOKUP ||
                                     s.nameId == StrId::STR_NEXT_PAGE_GESTURE ||
                                     s.nameId == StrId::STR_PREV_PAGE_GESTURE;
                            }),

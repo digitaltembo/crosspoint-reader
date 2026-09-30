@@ -18,6 +18,9 @@
 //     whose names enumerate but whose contents cannot be opened.
 //   * Install is write-then-rename, so an interrupted build leaves the previous
 //     index untouched rather than a half-written one.
+//   * Lists written by external tools are carried over: each keeps its order,
+//     loses the books that are gone, and follows renamed books. Books added
+//     since the tool last ran are not in them.
 
 #include <cstdint>
 #include <string>
@@ -55,6 +58,10 @@ struct BuildStats {
   bool indexReplaced = false;
   bool ranksDegraded = false;
   bool dedupDegraded = false;
+  // The previous index held external lists and this build could not carry them.
+  bool listsDropped = false;
+  // A generated list the options asked for was left out (memory or limits).
+  bool listsIncomplete = false;
 };
 
 // Walk `rootPath`, write `/.crosspoint/library.idx`, and report what happened.
@@ -65,10 +72,20 @@ struct BuildStats {
 // book over its filename. It reads an existing cache when available; otherwise
 // it stops the normal EPUB parser at the end of <metadata>, before the manifest,
 // without building the reader's spine, TOC, CSS, or section caches.
-bool buildLibraryIndex(const char* rootPath, BuildStats& stats, bool readMetadata = false);
+// `listOptions` (ClixListOption bits, from the library settings) picks which
+// top-level lists the index shows and which generated lists it holds. Series,
+// Tags and Custom come from book metadata, so they are empty without
+// `readMetadata`. Custom reads the custom lists file (LibraryCustomLists.h).
+bool buildLibraryIndex(const char* rootPath, BuildStats& stats, bool readMetadata = false,
+                       uint8_t listOptions = CLIX_OPTIONS_DEFAULT);
 
 // Live index path, shared by the builder and activity.
 const char* libraryIndexPath();
+
+// The header.customListsHash a build with `listOptions` would record: the
+// custom lists file's fingerprint when the Custom option is on, else 0. An index
+// holding another value is out of date.
+uint32_t libraryCustomListsHash(uint8_t listOptions);
 
 // A successful book transfer marks the retained index stale. The next Library
 // entry rebuilds it through the normal reconciliation path.

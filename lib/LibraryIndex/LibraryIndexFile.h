@@ -36,6 +36,15 @@ struct BookIdentity {
   uint32_t fileSize;
 };
 
+struct RebuildFields {
+  std::string title;
+  std::string sourceAuthor;
+  std::string authorSort;
+  std::string series;
+  std::string seriesIndex;
+  std::string tags;  // joined with '\n'
+};
+
 class LibraryIndexFile {
  public:
   LibraryIndexFile() = default;
@@ -47,8 +56,9 @@ class LibraryIndexFile {
   // caused by a format bug is visible in the log rather than looking like a slow
   // first boot.
   bool open(const char* path);
-  // Accept an otherwise valid stale fold so a rebuild can preserve arrival
-  // history without exposing stale sort/search keys to the browser.
+  // Accept an otherwise valid stale fold, or the previous format version, so a
+  // rebuild can preserve arrival history without exposing stale sort/search
+  // keys to the browser. A previous-format index has no lists.
   bool openForReconciliation(const char* path);
   void close();
   bool isOpen() const { return opened; }
@@ -64,6 +74,24 @@ class LibraryIndexFile {
   // 0xFFFF when out of range, which callers treat as "no such row" rather than
   // indexing anyway.
   uint16_t ordinalForRow(SortOrder order, uint16_t row);
+
+  // Lists 0..CLIX_BUILTIN_LISTS-1 are Recent, Title and Author; any later list
+  // came from an external tool. Zero for a closed or previous-format index.
+  uint16_t listCount() const { return opened && !previousFormat ? head.listCount : 0; }
+  // Descriptor of list `id`, validated against the header.
+  bool readList(uint16_t id, ClixListDesc& out);
+  // Entry at display position `row` of list `listId`, reading `list` (its
+  // descriptor) backwards when `descending`: a record ordinal for an identity or
+  // Books list, a child list id for a Groups list, and for a Mixed list either,
+  // with CLIX_ENTRY_LIST_BIT marking a list. 0xFFFF when out of range or
+  // invalid; a list entry is valid only when it names a LATER list, which is
+  // what keeps nesting free of cycles.
+  uint16_t entryAt(uint16_t listId, const ClixListDesc& list, uint16_t row, bool descending);
+  // `count` raw entries of a Books or Groups list starting at `first`, without
+  // checking their values.
+  bool readListEntries(const ClixListDesc& list, uint16_t first, uint16_t count, uint16_t* out);
+  // An external list's label; empty for built-in lists, which use tr().
+  bool readListLabel(const ClixListDesc& list, std::string& out);
 
   // Display rows (RecentAsc space) of up to MAX_IDENTITY_LOOKUPS books, 0xFFFF
   // for books not in the index. One chunked pass over the record section plus
@@ -88,6 +116,15 @@ class LibraryIndexFile {
   // Cleaned author spelling before the library-wide spelling vote. Empty is a
   // valid value, so success is independent of `out.empty()`.
   bool readSourceAuthor(const ClixRecord& record, std::string& out);
+  // The book's own primary-author file-as. Empty is a valid value.
+  bool readAuthorSort(const ClixRecord& record, std::string& out);
+  // readAuthor and readTitle in one read, for scans that need both per record.
+  // Both may come back empty; false only when the blob cannot be read.
+  bool readAuthorAndTitle(const ClixRecord& record, std::string& author, std::string& title);
+  // Every blob field after the display author, in one read: what a rebuild
+  // reuses from an unchanged book. Any may come back empty; false only when the
+  // blob cannot be read.
+  bool readRebuildFields(const ClixRecord& record, RebuildFields& out);
 
   // Absolute path of the book, rebuilt from its folder record.
   bool readPath(const ClixRecord& record, std::string& out);
@@ -96,10 +133,17 @@ class LibraryIndexFile {
   bool openImpl(const char* path, bool acceptStaleFold);
   bool readAt(uint32_t offset, void* dst, size_t len);
   bool readBlobField(const ClixRecord& record, uint8_t field, std::string& out);
+  // The first `fieldCount` length-prefixed fields after the name, fetched with a
+  // single read into `buf`; field i is buf.substr(offsets[i], lengths[i]).
+  bool readBlobFields(const ClixRecord& record, uint8_t fieldCount, std::string& buf, uint32_t* offsets,
+                      uint8_t* lengths);
 
   HalFile file;
   ClixHeader head{};
+  // Read and validated on open, so paging a built-in order reads no descriptor.
+  ClixListDesc builtins[CLIX_BUILTIN_LISTS]{};
   bool opened = false;
+  bool previousFormat = false;
   bool readFailed = false;
   ClixValidity lastValidity = ClixValidity::BadMagic;
 };

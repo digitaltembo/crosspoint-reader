@@ -39,6 +39,8 @@ One word on the page becomes highlighted:
 2. Press **Confirm** to look up the highlighted word.
 3. Press **Back** to return to the reader.
 
+On touch devices (X4 Pro and other touchscreen readers), long-press a word on the reading page to enter lookup mode with that word highlighted. Tap the highlight to show its definition, tap another word to move the highlight there, or tap away from the text to return to the reader. While **Settings → Controls → Long-Press Word to Look Up** is on (the default), this replaces **Look Up** in the reader menu; turn it off to get the menu entry back and keep long-presses for page-turn behavior.
+
 On the very first lookup with a dictionary (and again whenever the `.idx` or `.syn` source file changes), the reader shows *"Indexing dictionary…"* while it builds small sidecar files next to them — a `.qidx` for the word index, and a `.sidx` when a `.syn` synonym file is present. Each sidecar is rebuilt independently, only when its own source changes. This takes a few seconds for large dictionaries and makes all subsequent lookups fast. The sidecars can be deleted safely at any time — they will simply be rebuilt.
 
 ### How Lookup Works

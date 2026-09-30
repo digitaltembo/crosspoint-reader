@@ -6,10 +6,25 @@ All POD fields are written in the ESP32 little-endian representation used by
 
 ## `book.bin`
 
-### Version 10
+### Version 11
 
 `book.bin` stores EPUB metadata plus lookup tables for spine and TOC entries.
 The current firmware writes this version from `BookMetadataCache`.
+
+Version 11 appends five strings to the metadata block, after
+`textReferenceHref`: `titleSort`, `authorSort`, `series`, `seriesIndex` and
+`tags`. Each is empty when the OPF does not provide it. `BookMetadataCache::load()`
+skips them; `loadExtendedMetadata()` reads them.
+
+- `titleSort`: the main title's `file-as` (EPUB 3 `refines`, or an `opf:file-as`
+  attribute), else `calibre:title_sort`.
+- `authorSort`: `file-as` of the first creator whose role is `aut` or unset.
+- `series` / `seriesIndex`: `calibre:series` and `calibre:series_index`, else the
+  top-level `belongs-to-collection` typed `series` (or untyped) with its
+  `group-position`. Collections typed `set` are ignored. A trailing `.0` is
+  dropped from the index.
+- `tags`: `dc:subject` and `schema:genre` values, deduplicated
+  case-insensitively and joined with `\n`; at most 16 tags and 512 bytes.
 
 ImHex pattern:
 
@@ -18,7 +33,7 @@ import std.mem;
 import std.string;
 import std.core;
 
-#define EXPECTED_VERSION 10
+#define EXPECTED_VERSION 11
 #define MAX_STRING_LENGTH 65535
 
 struct String {
@@ -39,6 +54,11 @@ struct Metadata {
     String language [[comment("Book language code")]];
     String coverItemHref [[comment("Path to cover image")]];
     String textReferenceHref [[comment("Path to guided first text reference")]];
+    String titleSort [[comment("Title file-as, empty if absent")]];
+    String authorSort [[comment("Primary author file-as, empty if absent")]];
+    String series [[comment("Series name, empty if absent")]];
+    String seriesIndex [[comment("Position in series, empty if absent")]];
+    String tags [[comment("Newline-separated tags")]];
 };
 
 struct SpineEntry {
@@ -423,8 +443,10 @@ Written by `lib/LibraryIndex/LibraryBuilder.cpp`, read by `LibraryIndexFile`. On
 file describing every book on the card, so the shelf can sort and search
 thousands of titles without opening any of them.
 
-Format version 2. An index written by another version fails validation on open
-and is rebuilt; that is the entire migration mechanism.
+Format version 3. An index written by another version fails validation on open
+and is rebuilt; that is the entire migration mechanism. Version 2 stored the
+same folders, records and name blob, so a rebuild still reads its books to keep
+their arrival history and metadata.
 
 ### Layout
 
@@ -433,28 +455,149 @@ and is rebuilt; that is the entire migration mechanism.
 | Header | 0 | 64 bytes, `ClixHeader` |
 | Folders | `folderStart` | length-prefixed paths, one per folder |
 | Records | `recordStart` | `bookCount` × 128-byte `ClixRecord` |
-| Permutations | `permStart` | `bookCount` u16 author order, then `bookCount` u16 arrival order |
-| Name blob | `nameStart` | per record: path hash, name, canonical author, title, source author (see below) |
+| Lists | `listStart` | `listCount` × 16-byte `ClixListDesc`, then u16 list entries and labels (see below) |
+| Name blob | `nameStart` | per record: path hash, name, canonical author, title, source author, author sort (see below) |
 
-The arrival permutation runs oldest first, keyed by the record's FAT
+The Recent list runs oldest first, keyed by the record's FAT
 modification time (when the file landed on the card); `firstSeen` — the
 build-assigned discovery counter — breaks ties and carries books whose
 filesystem reports no time. Fold version 3 introduced the timestamp key; a
 fold bump rebuilds ranks while preserving `firstSeen`.
 Fold version 4 preserves leading articles in title sort and search keys.
+Fold version 5 folds the book's title sort (`file-as`) into `fold`, orders the
+Author list by the author's `file-as`, and appends the author-sort field to the
+name blob. Fold version 6 appends the series, series index and tags fields.
 
 Sections are 512-byte aligned so each starts on an SD block boundary.
+
+### Lists
+
+The list section starts with a table of `header.listCount` descriptors. Offsets
+are relative to `listStart`, so entries and labels may sit anywhere in the
+section:
+
+```text
+[u8 kind]        0 identity, 1 books, 2 groups, 3 mixed
+[u8 role]        0 external, 1 recent, 2 title, 3 author,
+                 4 series, 5 tags, 6 folders, 7 generated, 8 custom
+[u8 flags]       bit 0: top-level (shown as a tab or in the list picker)
+[u8 labelLen]
+[u16 entryCount] rows; bookCount for an identity list
+[u8 icon]        0 default, 1 list, 2 folder, 3 folder tree, 4 book,
+                 5 books, 6 recent, 7 title, 8 author, 9 series,
+                 10 one series, 11 tags, 12 tag, 13 bookmark, 14 star, 15 heart
+[u8 reserved]
+[u32 entriesOff] u16[entryCount]; unused by an identity list
+[u32 labelOff]   UTF-8, labelLen bytes
+```
+
+The icon is shown beside the list's row. `default`, or a value the firmware
+does not know, falls back to one for the role (recent, title, author, series,
+tags, folder tree), then to one for the kind (list for books, folder for groups
+and mixed). The builder writes an icon for every list it generates; external
+tools may pick any.
+
+- **Identity** lists every record in record (title) order and stores no
+  entries.
+- **Books** entries are record ordinals. A books list may name any subset of the
+  library, in any order.
+- **Groups** entries are ids of other lists, each of which opens as its own row.
+  An entry is valid only when it names a *later* list, so nesting can be any
+  depth and can never form a cycle.
+- **Mixed** entries are either: with bit 15 (`0x8000`) set, the low bits are a
+  later list's id; without it, a record ordinal.
+
+Lists 0, 1 and 2 are always Recent (books, every record), Title (identity) and
+Author (books, every record). They carry no label; the firmware names them.
+Each is top-level only when the library settings show it
+(`header.listOptions`, below), but all three are always written because search
+and the home screen read them.
+
+The builder then writes the lists the library settings ask for, rebuilt from the
+books on every build:
+
+- **Series** (role `series`, groups): one books list per series, in series
+  index order, listed alphabetically. Books without a series are not in it.
+- **Tags** (role `tags`, groups): one books list per tag, in title order,
+  listed alphabetically. Spellings that fold alike count as one tag. The builder
+  counts the first 512 distinct tags it meets and lists the 128 most used.
+- **Folders** (role `folders`, mixed): the card's root folder. Each folder
+  lists its subfolders alphabetically, then its books in title order. Folders
+  that hold only other folders appear too. Past 1,024 folders the list is left
+  out.
+- **Custom** (role `custom`, labelled): one list per entry of the custom lists
+  file (below), in file order. An entry of sublists is a groups list of one
+  books list per sublist that matches any book, in file order; an entry naming
+  a tag is itself a books list. Books lists are in title order.
+
+Their child lists have role `generated` and carry the series, tag, folder or
+sublist name as their label. Ids are assigned so every parent comes before its
+children.
+
+Series, Tags and Custom come from book metadata (`calibre:series` /
+`belongs-to-collection`, `dc:subject` / `schema:genre`), so they are empty when
+metadata reading is off.
+
+`header.listOptions` records which lists the build was asked for: bit 0 Recent,
+1 Title, 2 Author (top-level or not), 3 Series, 4 Tags, 5 Folders, 6 Custom. An
+index whose options differ from the settings is rebuilt, reusing every book's
+metadata. `header.customListsHash` (u32 at offset 51) is the FNV-1a hash of the
+custom lists file that build read, never 0, or 0 when the Custom option is off
+or there is no file; an index whose hash differs from the current file's is
+rebuilt the same way.
+
+Lists after the generated ones are written by external tools and have role
+`external`. The reader
+validates the three built-in descriptors on open. It checks each external
+descriptor's bounds when that list is read, and each entry's value as it is read.
+The library screen shows up to four top-level lists as tabs; with more, it opens
+on a picker of all of them.
+
+#### Custom lists file (`.crosspoint/customlists.json`)
+
+Written by the user. Each member is a top-level list, keyed by its label. Its
+value is either an object of sublists, each a label and the tag that puts a
+book in it, or a single tag, whose books the list holds directly.
+
+```json
+{
+  "By century": {
+    "8th Century BCE": "8th Century BCE",
+    "20th Century": "20th Century"
+  },
+  "By genre": {
+    "Nonfiction": "nonfiction",
+    "Fiction": "fiction"
+  },
+  "Favorites": "favorite"
+}
+```
+
+Tags match as the Tags lists merge them: case and accents are ignored. Several
+lists or sublists may name one tag. Members of any other shape, and sublists
+whose value is not a string, are skipped; a file that is not valid JSON adds no
+lists and sets `LISTS_INCOMPLETE`. At most 16 lists, 256 sublists (a list
+named by a tag counts as one) and 8 KiB of labels are read; the rest are left
+out, also setting `LISTS_INCOMPLETE`. The file is read as a stream, so its size
+costs no RAM.
 
 ### Records are exactly 128 bytes
 
 A fixed stride is what lets the reader seek straight to record *n* without an
 offset table, and read a screenful in one 4 KB block. `static_assert` enforces it.
 
-Each record carries `fold[96]`, the title normalised for search and sorting —
-accents stripped, case dropped, leading articles preserved — and `authorKey[12]`,
-the author's words folded and sorted so that "Victor Hugo" and "Hugo Victor" group as
-one person. `authorKey` is a GROUPING key, not an ordering one: the shelf orders by
-surname, derived separately from the display name.
+Each record carries `fold[96]`, the title normalised for sorting and search —
+accents stripped, case dropped, leading articles preserved. It folds the book's
+title sort ("Hobbit, The") when the OPF gives one, otherwise the shown title, and
+the records are stored in this order. Search matches `fold`, then the folded
+shown title and display author from the name blob, so the shown title stays
+searchable when it differs from the sort title.
+
+`authorKey[12]` holds the author's words folded and sorted so that "Victor Hugo"
+and "Hugo Victor" group as one person. `authorKey` is a GROUPING key, not an
+ordering one: the shelf orders by the folded `file-as` of the group's
+representative book when it has one, otherwise by surname, taken as the last word
+of the display name.
 
 The byte before the folded title records metadata extraction status: not
 attempted, extracted, or failed. The final four bytes contain the packed FAT
@@ -476,6 +619,10 @@ Per record, at `nameStart + nameOff`:
 [u8][author]     display author, one spelling chosen per authorKey across the library
 [u8][title]      the book's own title, or length 0 if it never gave one
 [u8][source]     cleaned author spelling before the library-wide spelling vote
+[u8][authorSort] the book's primary-author file-as, or length 0 if it never gave one
+[u8][series]     the book's series, or length 0
+[u8][seriesIdx]  its position in the series as written ("3", "1.5"), or length 0
+[u8][tags]       its tags joined with '\n', cut at a whole tag to fit 255 bytes
 ```
 
 The filename must stay the first textual field and stay the filename: `readPath`
@@ -483,8 +630,10 @@ rebuilds a book's path from it, so writing the display title there makes the boo
 impossible to open. That was a real defect, and it is why title has its own field.
 
 The source author is separate from the displayed canonical author so a later
-rebuild can repeat the spelling vote after books are added or removed. Existing
-display reads still stop at the author or title fields and retain their offsets.
+rebuild can repeat the spelling vote after books are added or removed. The author
+sort is kept for the same reason: a reused record needs it to order the author
+shelf without reparsing the book. Existing display reads still stop at the author
+or title fields and retain their offsets.
 
 ### Freshness and unchanged rebuilds
 
@@ -497,6 +646,21 @@ If every current record reuses metadata, the old and new counts agree, and no
 unreadable entry was seen, the staging files are discarded and the live index is
 left byte-for-byte unchanged. A normal rebuild action is therefore a freshness
 check, not a forced metadata reread.
+
+A rebuild that does replace the index regenerates the Series, Tags and Folders
+lists and carries external lists over, renumbered to follow the generated ones.
+Each previous
+record is matched to its new ordinal: by path during the walk, and by size for a
+rename. Every external list is then rewritten against the new ordinals:
+
+- Order is kept.
+- Books that are gone are dropped.
+- A groups entry whose child list ended up empty is dropped from its parent.
+- A malformed list is written back empty.
+
+Books added since the tool last ran are not in any external list. The mapping
+costs two bytes per book and per list, and is allocated only when there are
+lists to carry.
 
 ### Header flags
 
@@ -512,6 +676,15 @@ buffer, or that its fallible 8 KiB allocation failed. The walk still indexes
 every enumerated book; it only stops remembering additional identities for
 duplicate-dirent detection, so a damaged FAT may expose duplicates but cannot
 make a real book disappear.
+
+`LISTS_DROPPED` says the previous index held external lists that this build
+could not carry over, because the mapping could not be allocated or the previous
+lists could not be read. The build itself still succeeds, with only the built-in
+lists.
+
+`LISTS_INCOMPLETE` says a generated list the settings asked for was left out,
+because its working memory could not be allocated or it would pass the list or
+folder limits. The other lists are still written.
 
 `selfSize` is the expected file size. Comparing it against the real one is a free
 truncation guard: a build cut short by a power failure cannot pass.
