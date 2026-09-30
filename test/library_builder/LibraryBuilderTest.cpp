@@ -962,7 +962,8 @@ TEST_F(LibraryBuilderTest, GeneratedListsThatCannotBeAllocatedAreLeftOutWithoutF
   fake::add("/Books/c.epub");
   bookMetadata["/a.epub"] = {"Alpha", "A", "", "", "Saga", "1", "Fiction"};
   bookMetadata["/b.epub"] = {"Bravo", "B", "", "", "Saga", "2", "Poetry"};
-  fake::add("/.crosspoint/customlists.json", R"({"genre": ["Genre", {"Verse": "Poetry", "Novels": "Fiction"}]})");
+  fake::add("/.crosspoint/customlists.json",
+            R"({"Genre": {"Verse": "Poetry", "Novels": "Fiction"}, "Read": "fiction"})");
   initial();
   const auto old = fake::files[INDEX]->bytes;
 
@@ -1063,17 +1064,19 @@ TEST_F(LibraryBuilderTest, CustomListsFollowTheFileAndMatchTagsInAnyCase) {
   bookMetadata["/b.epub"] = {"Bravo", "B", "", "", "", "", "8th century BCE"};
   bookMetadata["/c.epub"] = {"Charlie", "C", "", "", "", "", "20th Century\nOriginal Language -- Chinese"};
   fake::add(CUSTOM_LISTS, R"({
-    "century": ["By century", {
+    "By century": {
       "8th Century BCE": "8th Century BCE",
       "5th Century BCE": "5th Century BCE",
       "20th Century": "20th Century"
-    }],
-    "ignored": {"not": "a list"},
-    "translated": ["Works in “translation”", {
+    },
+    "Ignored": ["not", "a list"],
+    "Works in “translation”": {
       "Chinese": "Original Language -- Chinese",
       "Nationality: Chinese": "chinese",
       "Skipped": 3
-    }, "extra"]
+    },
+    "Unmatched": "Poetry",
+    "Chinese books": "CHINESE"
   })");
   ASSERT_TRUE(buildLibraryIndex("/", stats, true, WITH_CUSTOM));
   EXPECT_FALSE(stats.listsIncomplete);
@@ -1081,8 +1084,9 @@ TEST_F(LibraryBuilderTest, CustomListsFollowTheFileAndMatchTagsInAnyCase) {
   LibraryIndexFile index;
   ASSERT_TRUE(index.open(INDEX));
   EXPECT_NE(index.header().customListsHash, 0u);
-  // By century 3 with its non-empty sublists 4 and 5, then translated 6 with 7 and 8.
-  ASSERT_EQ(index.listCount(), 9);
+  // By century 3 with its non-empty sublists 4 and 5, translated 6 with 7 and
+  // 8, then the direct list 9.
+  ASSERT_EQ(index.listCount(), 10);
   ClixListDesc century{};
   ASSERT_TRUE(index.readList(3, century));
   EXPECT_EQ(century.role, CLIX_ROLE_CUSTOM);
@@ -1101,6 +1105,15 @@ TEST_F(LibraryBuilderTest, CustomListsFollowTheFileAndMatchTagsInAnyCase) {
   EXPECT_EQ(label, "Chinese");
   EXPECT_EQ(listContents(index, 8, &label), std::vector<std::string>{"/a.epub"});
   EXPECT_EQ(label, "Nationality: Chinese");
+
+  ClixListDesc direct{};
+  ASSERT_TRUE(index.readList(9, direct));
+  EXPECT_EQ(direct.kind, CLIX_LIST_BOOKS);
+  EXPECT_EQ(direct.role, CLIX_ROLE_CUSTOM);
+  EXPECT_EQ(direct.icon, CLIX_ICON_TAG);
+  EXPECT_NE(direct.flags & CLIX_LIST_TOP_LEVEL, 0);
+  EXPECT_EQ(listContents(index, 9, &label), std::vector<std::string>{"/a.epub"}) << "an unmatched tag is left out";
+  EXPECT_EQ(label, "Chinese books");
 }
 
 TEST_F(LibraryBuilderTest, AMissingOrMalformedCustomListsFileAddsNoLists) {
@@ -1113,7 +1126,7 @@ TEST_F(LibraryBuilderTest, AMissingOrMalformedCustomListsFileAddsNoLists) {
   EXPECT_EQ(index.header().customListsHash, 0u);
   index.close();
 
-  fake::add(CUSTOM_LISTS, R"({"genre": ["Genre", {"Poetry": "Poetry"})");
+  fake::add(CUSTOM_LISTS, R"({"Genre": {"Poetry": "Poetry"})");
   ASSERT_TRUE(buildLibraryIndex("/", stats, true, WITH_CUSTOM));
   EXPECT_TRUE(stats.listsIncomplete);
   ASSERT_TRUE(index.open(INDEX));
@@ -1124,7 +1137,7 @@ TEST_F(LibraryBuilderTest, AMissingOrMalformedCustomListsFileAddsNoLists) {
 TEST_F(LibraryBuilderTest, EditingTheCustomListsFileRebuildsTheIndex) {
   bookMetadata["/a.epub"] = {"Alpha", "A", "", "", "", "", "Poetry"};
   bookMetadata["/b.epub"] = {"Bravo", "B", "", "", "", "", "Drama"};
-  fake::add(CUSTOM_LISTS, R"({"genre": ["Genre", {"Verse": "poetry"}]})");
+  fake::add(CUSTOM_LISTS, R"({"Genre": {"Verse": "poetry"}})");
   ASSERT_TRUE(buildLibraryIndex("/", stats, true, WITH_CUSTOM));
   const auto built = fake::files[INDEX]->bytes;
   EXPECT_EQ(libraryCustomListsHash(WITH_CUSTOM), [&] {
@@ -1138,7 +1151,7 @@ TEST_F(LibraryBuilderTest, EditingTheCustomListsFileRebuildsTheIndex) {
   EXPECT_FALSE(stats.indexReplaced) << "same books, options and file";
   EXPECT_EQ(fake::files[INDEX]->bytes, built);
 
-  fake::add(CUSTOM_LISTS, R"({"genre": ["Genre", {"Verse": "poetry", "Plays": "Drama"}]})");
+  fake::add(CUSTOM_LISTS, R"({"Genre": {"Verse": "poetry", "Plays": "Drama"}})");
   fake::parses = 0;
   ASSERT_TRUE(buildLibraryIndex("/", stats, true, WITH_CUSTOM));
   EXPECT_TRUE(stats.indexReplaced);

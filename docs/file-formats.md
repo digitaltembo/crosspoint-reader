@@ -517,9 +517,10 @@ books on every build:
   lists its subfolders alphabetically, then its books in title order. Folders
   that hold only other folders appear too. Past 1,024 folders the list is left
   out.
-- **Custom** (role `custom`, groups, labelled): one list per entry of the
-  custom lists file (below), of one books list per sublist that matches any
-  book, in file order, each in title order.
+- **Custom** (role `custom`, labelled): one list per entry of the custom lists
+  file (below), in file order. An entry of sublists is a groups list of one
+  books list per sublist that matches any book, in file order; an entry naming
+  a tag is itself a books list. Books lists are in title order.
 
 Their child lists have role `generated` and carry the series, tag, folder or
 sublist name as their label. Ids are assigned so every parent comes before its
@@ -546,29 +547,31 @@ on a picker of all of them.
 
 #### Custom lists file (`.crosspoint/customlists.json`)
 
-Written by the user. Each member is a list: its label, then its sublists, each
-a label and the tag that puts a book in it.
+Written by the user. Each member is a top-level list, keyed by its label. Its
+value is either an object of sublists, each a label and the tag that puts a
+book in it, or a single tag, whose books the list holds directly.
 
 ```json
 {
-  "century": ["By century", {
+  "By century": {
     "8th Century BCE": "8th Century BCE",
     "20th Century": "20th Century"
-  }],
-  "genre": ["Genre", {
-    "Read by Nolan": "Read",
-    "Science Fiction": "Science Fiction"
-  }]
+  },
+  "By genre": {
+    "Nonfiction": "nonfiction",
+    "Fiction": "fiction"
+  },
+  "Favorites": "favorite"
 }
 ```
 
 Tags match as the Tags lists merge them: case and accents are ignored. Several
-sublists may name one tag, in the same list or different ones. Members of any
-other shape, and sublists whose value is not a string, are skipped; a file that
-is not valid JSON adds no lists and sets `LISTS_INCOMPLETE`. At most 16 lists,
-256 sublists and 8 KiB of labels are read; the rest are left out, also setting
-`LISTS_INCOMPLETE`. The member keys are not used. The file is read as a stream,
-so its size costs no RAM.
+lists or sublists may name one tag. Members of any other shape, and sublists
+whose value is not a string, are skipped; a file that is not valid JSON adds no
+lists and sets `LISTS_INCOMPLETE`. At most 16 lists, 256 sublists (a list
+named by a tag counts as one) and 8 KiB of labels are read; the rest are left
+out, also setting `LISTS_INCOMPLETE`. The file is read as a stream, so its size
+costs no RAM.
 
 ### Records are exactly 128 bytes
 

@@ -173,32 +173,35 @@ bool addLabel(CustomLists& out, const std::string& text, uint16_t& off, uint8_t&
   return true;
 }
 
-// The rest of one entry after its '[': the label, the sublist object, then any
-// further items, which are ignored. An entry of another shape is skipped.
-bool parseEntry(JsonStream& json, CustomLists& out, std::string& key, std::string& value) {
-  if (json.next() != '"') {
-    // Not ["label", {...}]: skip the remaining items.
-    for (;;) {
-      if (!json.skipValue(1)) return false;
-      const int after = json.next();
-      json.get();
-      if (after == ']') return true;
-      if (after != ',') return false;
-    }
-  }
-  std::string label;
-  if (!json.string(&label)) return false;
-  const int afterLabel = json.next();
-  json.get();
-  if (afterLabel == ']') return true;
-  if (afterLabel != ',') return false;
+// The value of the member labelled `label`: a tag, or an object of sublists. A
+// value of another shape is skipped.
+bool parseEntry(JsonStream& json, CustomLists& out, const std::string& label, std::string& key, std::string& value) {
+  const int c = json.next();
+  if (c != '"' && c != '{') return json.skipValue(1);
 
   const bool room = out.listCount < MAX_CUSTOM_LISTS;
-  CustomLists::List list{0, 0, out.subCount, 0};
-  bool listed = room && !label.empty() && addLabel(out, label, list.labelOff, list.labelLen);
+  CustomLists::List list{0, 0, out.subCount, 0, c == '"'};
+  const bool listed = room && !label.empty() && addLabel(out, label, list.labelOff, list.labelLen);
   if (!room || (!label.empty() && !listed)) out.truncated = true;
 
-  if (json.next() == '{') {
+  // A sublist, unlabelled for a direct tag.
+  const auto addSub = [&](const std::string& subLabel) {
+    if (!listed || fold(value).empty()) return;
+    CustomLists::Sub sub{foldedTagHash(value), 0, 0};
+    if (out.subCount < MAX_CUSTOM_SUBLISTS &&
+        (subLabel.empty() || addLabel(out, subLabel, sub.labelOff, sub.labelLen))) {
+      out.subs[out.subCount++] = sub;
+      list.subCount++;
+    } else {
+      out.truncated = true;
+    }
+  };
+
+  if (list.direct) {
+    if (!json.string(&value)) return false;
+    key.clear();
+    addSub(key);
+  } else {
     json.get();
     if (json.next() == '}') {
       json.get();
@@ -207,15 +210,7 @@ bool parseEntry(JsonStream& json, CustomLists& out, std::string& key, std::strin
         if (!json.string(&key) || !json.expect(':')) return false;
         if (json.next() == '"') {
           if (!json.string(&value)) return false;
-          if (listed && !key.empty() && !fold(value).empty()) {
-            CustomLists::Sub sub{foldedTagHash(value), 0, 0};
-            if (out.subCount < MAX_CUSTOM_SUBLISTS && addLabel(out, key, sub.labelOff, sub.labelLen)) {
-              out.subs[out.subCount++] = sub;
-              list.subCount++;
-            } else {
-              out.truncated = true;
-            }
-          }
+          if (!key.empty()) addSub(key);
         } else if (!json.skipValue(2)) {
           return false;
         }
@@ -225,17 +220,9 @@ bool parseEntry(JsonStream& json, CustomLists& out, std::string& key, std::strin
         if (after != ',') return false;
       }
     }
-  } else if (!json.skipValue(1)) {
-    return false;
   }
   if (listed && list.subCount > 0) out.lists[out.listCount++] = list;
-
-  for (;;) {
-    const int after = json.next();
-    json.get();
-    if (after == ']') return true;
-    if (after != ',' || !json.skipValue(1)) return false;
-  }
+  return true;
 }
 
 }  // namespace
@@ -265,6 +252,7 @@ CustomListsResult loadCustomLists(const char* path, CustomLists& out) {
   }
 
   JsonStream json(file);
+  std::string label;
   std::string key;
   std::string value;
   bool ok = json.expect('{');
@@ -272,14 +260,7 @@ CustomListsResult loadCustomLists(const char* path, CustomLists& out) {
     json.get();
   } else {
     while (ok) {
-      ok = json.string(nullptr) && json.expect(':');
-      if (!ok) break;
-      if (json.next() == '[') {
-        json.get();
-        ok = parseEntry(json, out, key, value);
-      } else {
-        ok = json.skipValue(1);
-      }
+      ok = json.string(&label) && json.expect(':') && parseEntry(json, out, label, key, value);
       if (!ok) break;
       const int after = json.next();
       json.get();

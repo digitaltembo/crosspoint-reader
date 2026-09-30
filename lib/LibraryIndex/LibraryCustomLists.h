@@ -1,12 +1,14 @@
 #pragma once
 
-// The custom lists file: lists of tag-defined sublists, written by the user.
+// The custom lists file: tag-defined lists, written by the user.
 //
-//   { "<list id>": ["<list label>", { "<sublist label>": "<tag>", ... }], ... }
+//   { "<list label>": { "<sublist label>": "<tag>", ... } | "<tag>", ... }
 //
-// Each entry becomes a top-level list with one sublist per pair, in file order,
-// holding the books that carry that tag. Entries of any other shape are
-// skipped. The file is read as a stream, so no JSON document is held in RAM.
+// A member whose value is an object becomes a top-level list with one sublist
+// per pair, in file order, each holding the books that carry that tag. A member
+// whose value is a tag becomes a top-level list of those books directly.
+// Members of any other shape are skipped. The file is read as a stream, so no
+// JSON document is held in RAM.
 
 #include <cstdint>
 #include <memory>
@@ -25,6 +27,9 @@ struct CustomLists {
     uint8_t labelLen;
     uint16_t firstSub;
     uint16_t subCount;
+    // Named a tag rather than sublists: its one sublist is unlabelled, and
+    // its books are listed directly.
+    bool direct;
   };
   struct Sub {
     uint32_t tagHash;  // foldedTagHash of its tag

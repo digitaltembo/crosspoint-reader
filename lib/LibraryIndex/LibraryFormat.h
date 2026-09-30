@@ -125,7 +125,7 @@ enum ClixListRole : uint8_t {
   CLIX_ROLE_TAGS = 5,       // Groups of per-tag lists
   CLIX_ROLE_FOLDERS = 6,    // Mixed: the card's root folder
   CLIX_ROLE_GENERATED = 7,  // a child of a generated list; labelled
-  CLIX_ROLE_CUSTOM = 8,     // Groups of per-tag lists from the custom lists file; labelled
+  CLIX_ROLE_CUSTOM = 8,     // from the custom lists file: Groups of per-tag lists, or one tag's Books; labelled
 };
 
 // The icon shown beside a list's row. DEFAULT, and any value this firmware does

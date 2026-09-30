@@ -4,7 +4,8 @@
 // settings ask: Series (a Groups list of per-series Books lists, each in series
 // order), Tags (the same per tag, in title order), Folders (a Mixed tree that
 // mirrors the card's folders) and Custom (one Groups list per entry of the
-// custom lists file, of per-tag Books lists; see LibraryCustomLists.h).
+// custom lists file, of per-tag Books lists, or one tag's Books list; see
+// LibraryCustomLists.h).
 //
 // Each kind is computed on its own and its scratch released before the next, so
 // the peak is the largest kind rather than their sum. Results are staged to two

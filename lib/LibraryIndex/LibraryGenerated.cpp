@@ -531,8 +531,9 @@ bool generateFolders(GeneratedListSource& source, const uint16_t books, const ui
 }
 
 // One Groups list per custom list, of one Books list per non-empty sublist in
-// file order, each in title order. One pass counts every sublist's books and
-// a second fills them, however many custom lists there are.
+// file order, each in title order; a custom list named by a tag is one Books
+// list itself. One pass counts every sublist's books and a second fills them,
+// however many custom lists there are.
 bool generateCustom(GeneratedListSource& source, const uint16_t books, Writer& writer, const uint16_t firstId,
                     const uint16_t budget, bool& incomplete, uint32_t& units) {
   CustomLists custom;
@@ -615,10 +616,19 @@ bool generateCustom(GeneratedListSource& source, const uint16_t books, Writer& w
     uint16_t children = 0;
     for (uint16_t s = list.firstSub; s < list.firstSub + list.subCount; s++) children += fill[s] > begins(s);
     if (children == 0) continue;
-    if (used + 1u + children > budget) {
+    if (used + (list.direct ? 1u : 1u + children) > budget) {
       LOG_ERR("LIBGEN", "custom lists exceed the list limit");
       incomplete = true;
       return true;
+    }
+    if (list.direct) {
+      const uint16_t s = list.firstSub;
+      service(units);
+      writer.begin(CLIX_LIST_BOOKS, CLIX_ROLE_CUSTOM, CLIX_LIST_TOP_LEVEL, CLIX_ICON_TAG);
+      for (uint32_t k = begins(s); k < fill[s]; k++) writer.entry(entries[k]);
+      writer.end(custom.label(list.labelOff, list.labelLen));
+      used++;
+      continue;
     }
     const uint16_t id = static_cast<uint16_t>(firstId + used);
     writer.begin(CLIX_LIST_GROUPS, CLIX_ROLE_CUSTOM, CLIX_LIST_TOP_LEVEL, CLIX_ICON_TAGS);
