@@ -24,6 +24,22 @@ struct Rect {
   int height;
 
   explicit Rect(int x = 0, int y = 0, int width = 0, int height = 0) : x(x), y(y), width(width), height(height) {}
+
+  bool contains(int px, int py) const { return px >= x && px < x + width && py >= y && py < y + height; }
+};
+
+// Geometry of a card-style home (see BaseTheme::hasCardHome): one large
+// most-recent-book card, smaller cards for the next books, and an icon bar.
+// Shared by the theme's drawing and HomeActivity's touch hit-testing.
+struct CardHomeLayout {
+  static constexpr int MAX_CARDS = 4;
+  static constexpr int ICON_COUNT = 3;
+  Rect cards[MAX_CARDS];
+  Rect covers[MAX_CARDS];
+  bool showProgress[MAX_CARDS] = {};
+  int cardCount = 0;  // slots that fit on screen; books beyond this are not shown
+  Rect iconBar;
+  Rect icons[ICON_COUNT];  // touch/selection areas, left to right
 };
 
 struct ThemeMetrics {
@@ -291,6 +307,17 @@ class BaseTheme {
   // Thumb generation height for home covers; 0 means use metrics.homeCoverHeight.
   // Themes with slots wider than 0.6 aspect override this so covers still fill.
   virtual int homeCoverThumbHeight(const GfxRenderer&) const { return 0; }
+
+  // Card home: replaces the cover tile + button menu with book cards and an
+  // icon bar. Covers are drawn separately (drawCardHomeCover) so HomeActivity
+  // can cache them across selection repaints.
+  virtual bool hasCardHome() const { return false; }
+  virtual CardHomeLayout cardHomeLayout(const GfxRenderer&) const { return CardHomeLayout(); }
+  // progress[i] is book i's read percentage, or -1 when unknown.
+  virtual void drawCardHome(GfxRenderer&, const CardHomeLayout&, const std::vector<RecentBook>&, const int* progress,
+                            int selectorIndex) const {}
+  // Draws one cover (or a placeholder when thumbPath is empty/unreadable).
+  virtual void drawCardHomeCover(const GfxRenderer&, Rect, const std::string& thumbPath) const {}
 
   // Shared constants and helpers for battery drawing (used by all themes)
   static constexpr int batteryPercentSpacing = 4;

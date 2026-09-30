@@ -12,12 +12,13 @@
 
 #include "GfxRenderer.h"
 #include "MappedInputManager.h"
+#include "settings/SettingsSection.h"
 #include "util/ScreenshotInfo.h"
 
 class Activity;    // forward declaration
 class RenderLock;  // forward declaration
 
-enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU };
+enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, PLUGINS, FILE_TRANSFER, SETTINGS_MENU };
 
 /**
  * ActivityManager
@@ -84,11 +85,12 @@ class ActivityManager {
   void goToFileTransfer();
   void goToJoinNetwork();  // File Transfer straight into Join Network (post heap-defrag reboot)
   void goToUsbDrive();
-  void goToSettings();
+  // openSection jumps straight into one group (Count = the section list).
+  void goToSettings(SettingsSection openSection = SettingsSection::Count);
   void goToFileBrowser(std::string path = {});
   void goToLibrary();
   void goToBrowser();
-  void goToPlugins(bool showOpds);
+  void goToPlugins();
   void goToReader(std::string path, bool allowFastInitialRefresh = false);
   void goToSleep(bool fromTimeout = false);
   void goToBoot();

@@ -11,25 +11,19 @@ namespace fui = freeink::ui;
 
 namespace {
 constexpr StrId menuItems[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
-    StrId::STR_JOIN_NETWORK,
-    StrId::STR_CALIBRE_WIRELESS,
-    StrId::STR_CREATE_HOTSPOT,
+    StrId::STR_JOIN_NETWORK, StrId::STR_CALIBRE_WIRELESS, StrId::STR_CREATE_HOTSPOT, StrId::STR_CLOUD_LIBRARIES,
 #if FREEINK_CAP_USB_MSC
     StrId::STR_USB_DRIVE,
 #endif
 };
 constexpr StrId menuDescs[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
-    StrId::STR_JOIN_DESC,
-    StrId::STR_CALIBRE_DESC,
-    StrId::STR_HOTSPOT_DESC,
+    StrId::STR_JOIN_DESC,      StrId::STR_CALIBRE_DESC, StrId::STR_HOTSPOT_DESC, StrId::STR_CLOUD_LIBRARIES_DESC,
 #if FREEINK_CAP_USB_MSC
     StrId::STR_USB_DRIVE_DESC,
 #endif
 };
 constexpr UIIcon menuIcons[NetworkModeSelectionActivity::MENU_ITEM_COUNT] = {
-    UIIcon::Wifi,
-    UIIcon::Library,
-    UIIcon::Hotspot,
+    UIIcon::Wifi, UIIcon::Library, UIIcon::Hotspot, UIIcon::Blocks,
 #if FREEINK_CAP_USB_MSC
     UIIcon::Usb,
 #endif

@@ -1,14 +1,15 @@
 #pragma once
+#include <array>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include "./FileBrowserActivity.h"
 #include "RecentBooksStore.h"
 #include "activities/Activity.h"
 #include "components/CoverGridHomeUi.h"
+#include "components/themes/BaseTheme.h"
 #include "util/ButtonNavigator.h"
-
-struct Rect;
 
 class HomeActivity final : public Activity {
   std::unique_ptr<CoverGridHomeUi> coverGridUi;
@@ -17,11 +18,8 @@ class HomeActivity final : public Activity {
   bool recentsLoading = false;
   bool recentsLoaded = false;
   bool firstRenderDone = false;
-  bool hasOpdsServers = false;
+  // The Plugins slot (index 2) only appears when a plugin is installed.
   bool hasPlugins = false;
-  // The home "library" slot (index 2) shows Plugins when any plugin is
-  // installed, otherwise OPDS. The index converters gate on its presence.
-  bool hasLibrarySlot() const { return hasPlugins || hasOpdsServers; }
   bool hasContinueReading = false;
   bool coverRendered = false;      // Track if cover has been rendered once
   bool coverBufferStored = false;  // Track if cover buffer is stored
@@ -35,18 +33,31 @@ class HomeActivity final : public Activity {
   int coverRectW = 0;
   int coverRectH = 0;
   std::vector<RecentBook> recentBooks;
+
+  // Card home (theme hasCardHome): recentBooks holds only the books that get
+  // a card, followed in selectorIndex order by the icon bar's CARD_MENU items.
+  bool cardHome = false;
+  CardHomeLayout cardLayout;
+  std::vector<int> cardProgress;  // read percentage per card, -1 unknown
+  // Per-card cover snapshots (a few KB each) so selection repaints restore
+  // covers instead of re-reading thumbnails from SD.
+  std::array<std::unique_ptr<uint8_t[]>, CardHomeLayout::MAX_CARDS> cardCovers;
+  std::array<size_t, CardHomeLayout::MAX_CARDS> cardCoverSizes{};
+  static constexpr HomeMenuItem CARD_MENU[CardHomeLayout::ICON_COUNT] = {
+      HomeMenuItem::SETTINGS_MENU, HomeMenuItem::FILE_TRANSFER, HomeMenuItem::LIBRARY};
+
   const HomeMenuItem initialMenuItem;
   const bool cleanInitialRefresh;
 
   // Convert HomeMenuItem to menu index (used in onEnter)
-  static int menuItemToIndex(HomeMenuItem item, bool hasOpdsUrl) {
+  static int menuItemToIndex(HomeMenuItem item, bool hasPlugins) {
     int i = 0;
     if (item == HomeMenuItem::FILE_BROWSER) return i;
     ++i;
     if (item == HomeMenuItem::LIBRARY) return i;
     ++i;
-    if (item == HomeMenuItem::OPDS_BROWSER) return hasOpdsUrl ? i : 0;
-    if (hasOpdsUrl) ++i;
+    if (item == HomeMenuItem::PLUGINS) return hasPlugins ? i : 0;
+    if (hasPlugins) ++i;
     if (item == HomeMenuItem::FILE_TRANSFER) return i;
     ++i;
     if (item == HomeMenuItem::SETTINGS_MENU) return i;
@@ -54,21 +65,29 @@ class HomeActivity final : public Activity {
   }
 
   // Convert menu index to HomeMenuItem (used in loop)
-  static HomeMenuItem indexToMenuItem(int idx, bool hasOpdsUrl) {
+  static HomeMenuItem indexToMenuItem(int idx, bool hasPlugins) {
     int i = 0;
     if (idx == i++) return HomeMenuItem::FILE_BROWSER;
     if (idx == i++) return HomeMenuItem::LIBRARY;
-    if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
+    if (hasPlugins && idx == i++) return HomeMenuItem::PLUGINS;
     if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
     return HomeMenuItem::NONE;
   }
+  int menuIndexOf(HomeMenuItem item) const;
+  HomeMenuItem menuItemAt(int idx) const;
+
+  void renderCardHome();
+  bool handleCardHomeInput();
+  void activateSelection();
+  void drawCardCovers();
+  void freeCardCovers();
+
   void onSelectBook(const std::string& path);
   void onFileBrowserOpen();
   void onLibraryOpen();
   void onSettingsOpen();
   void onFileTransferOpen();
-  void onOpdsBrowserOpen();
   void onPluginsOpen();
 
   int getMenuItemCount() const;
