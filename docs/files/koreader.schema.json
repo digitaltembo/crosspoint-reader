@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "koreader.json",
+  "description": "KOReader progress-sync configuration, written by KOReaderCredentialStore (lib/KOReaderSync/KOReaderCredentialStore.cpp) to /.crosspoint/koreader.json.",
+  "type": "object",
+  "properties": {
+    "cfgVersion": {
+      "description": "Config format version; absent means 1. On loading a version below 2 with credentials and an empty serverUrl, serverUrl is pinned to the old default https://sync.koreader.rocks:443.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 255,
+      "default": 1
+    },
+    "username": {
+      "type": "string",
+      "default": ""
+    },
+    "password_obf": {
+      "description": "Password XORed with a key derived from the device MAC address, then base64-encoded. Only decodable on the device that wrote it.",
+      "type": "string",
+      "contentEncoding": "base64"
+    },
+    "password": {
+      "description": "Legacy plaintext password, read only when password_obf is absent or undecodable.",
+      "type": "string",
+      "deprecated": true
+    },
+    "serverUrl": {
+      "description": "Custom sync server URL. Empty uses https://sync.crosspointreader.com; a value without a scheme gets http:// prepended.",
+      "type": "string",
+      "default": ""
+    },
+    "matchMethod": {
+      "description": "How documents are matched on the server: 0 = filename, 1 = partial MD5 of file content. Out-of-range values load as 0.",
+      "type": "integer",
+      "enum": [0, 1],
+      "default": 0
+    },
+    "sendMetadata": {
+      "description": "Send document metadata along with progress.",
+      "type": "boolean",
+      "default": false
+    },
+    "syncBehavior": {
+      "description": "How manual sync resolves differences: 0 = ask every time, 1 = smart (auto-resolve using furthest progress). Absent or out-of-range values load as 0.",
+      "type": "integer",
+      "enum": [0, 1]
+    }
+  },
+  "required": ["cfgVersion", "username", "password_obf", "serverUrl", "matchMethod", "sendMetadata", "syncBehavior"]
+}

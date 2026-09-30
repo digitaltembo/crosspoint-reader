@@ -1,0 +1,378 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "settings.json",
+  "description": "User settings, written by CrossPointSettings (src/CrossPointSettings.cpp) to /.crosspoint/settings.json. Most keys come from getSettingsList() in src/SettingsList.h; board-specific entries are only written on boards that have them. Every key is optional: missing keys keep their default, out-of-range enums and toggles fall back to the default, and out-of-range values are clamped.",
+  "type": "object",
+  "$defs": {
+    "toggle": {
+      "description": "0 = off, 1 = on.",
+      "type": "integer",
+      "enum": [0, 1]
+    },
+    "enum2": { "type": "integer", "minimum": 0, "maximum": 1 },
+    "enum3": { "type": "integer", "minimum": 0, "maximum": 2 },
+    "enum4": { "type": "integer", "minimum": 0, "maximum": 3 },
+    "homeButtonAction": {
+      "description": "HomeButtonAction: 0 = home, 1 = ignore, 2 = next page, 3 = force refresh, 4 = footnotes, 5 = confirm, 6 = KOReader sync, 7 = bookmark, 8 = dictionary, 9 = reader menu, 10 = toggle frontlight. Written only on boards with a home key.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10
+    },
+    "frontButtonHardware": {
+      "description": "Physical front button index: 0 = back, 1 = confirm, 2 = left, 3 = right. If any two remap keys collide, all four reset to the identity mapping.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    }
+  },
+  "properties": {
+    "sleepScreen": {
+      "description": "0 = dark, 1 = light, 2 = custom, 3 = cover, 4 = cover + custom, 5 = none, 6 = quick resume, 7 = transparent custom.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 7,
+      "default": 0
+    },
+    "sleepScreenCoverMode": {
+      "description": "0 = fit, 1 = crop.",
+      "$ref": "#/$defs/enum2",
+      "default": 0
+    },
+    "sleepScreenCoverFilter": {
+      "description": "0 = none, 1 = contrast (black and white), 2 = inverted.",
+      "$ref": "#/$defs/enum3",
+      "default": 0
+    },
+    "quickResumeSleepScreen": {
+      "description": "0 = never, 1 = after timeout.",
+      "$ref": "#/$defs/enum2",
+      "default": 0
+    },
+    "hideBatteryPercentage": {
+      "description": "0 = never, 1 = in reader, 2 = always.",
+      "$ref": "#/$defs/enum3",
+      "default": 0
+    },
+    "refreshFrequency": {
+      "description": "Pages between full e-ink refreshes: 0 = 1, 1 = 5, 2 = 10, 3 = 15, 4 = 30, 5 = never.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5,
+      "default": 3
+    },
+    "uiTheme": {
+      "description": "0 = classic, 1 = Lyra, 2 = Lyra extended, 3 = RoundedRaff.",
+      "$ref": "#/$defs/enum4",
+      "default": 1
+    },
+    "fadingFix": {
+      "description": "Sunlight fading compensation. Not written on touch boards.",
+      "$ref": "#/$defs/toggle",
+      "default": 0
+    },
+    "frontlightRestoreOnWake": {
+      "description": "Restore the saved frontlight on/off state after boot or wake. Frontlight boards only.",
+      "$ref": "#/$defs/toggle",
+      "default": 1
+    },
+    "screenInverted": {
+      "description": "Night mode (inverted output).",
+      "$ref": "#/$defs/toggle",
+      "default": 0
+    },
+    "fontFamily": {
+      "description": "Built-in reader font: 0 = Noto Serif, 1 = Noto Sans. Ignored while sdFontFamilyName is set. Legacy value 2 (OpenDyslexic) migrates to sdFontFamilyName \"OpenDyslexic\".",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2,
+      "default": 0
+    },
+    "fontSize": {
+      "description": "Reader font point size, snapped to the nearest size the active family ships. Legacy files stored a slot 0..3 (small..extra large), which migrates to 12/14/16/18 pt.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "default": 14
+    },
+    "sdFontFamilyName": {
+      "description": "Selected SD card font family (folder name). Omitted when a built-in family is selected.",
+      "type": "string",
+      "maxLength": 31
+    },
+    "lineSpacing": {
+      "description": "0 = tight, 1 = normal, 2 = wide, 3 = extra wide.",
+      "$ref": "#/$defs/enum4",
+      "default": 1
+    },
+    "screenMargin": {
+      "description": "Reader margin in pixels, set in steps of 5.",
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 40,
+      "default": 5
+    },
+    "paragraphAlignment": {
+      "description": "0 = justify, 1 = left, 2 = center, 3 = right, 4 = book's style.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4,
+      "default": 0
+    },
+    "embeddedStyle": {
+      "description": "Apply the book's embedded CSS.",
+      "$ref": "#/$defs/toggle",
+      "default": 1
+    },
+    "focusReadingEnabled": {
+      "description": "Bold the first part of each word.",
+      "$ref": "#/$defs/toggle",
+      "default": 0
+    },
+    "hyphenationEnabled": {
+      "$ref": "#/$defs/toggle",
+      "default": 0
+    },
+    "orientation": {
+      "description": "0 = portrait, 1 = landscape clockwise, 2 = inverted, 3 = landscape counter-clockwise.",
+      "$ref": "#/$defs/enum4",
+      "default": 0
+    },
+    "extraParagraphSpacing": {
+      "$ref": "#/$defs/toggle",
+      "default": 1
+    },
+    "textAntiAliasing": {
+      "$ref": "#/$defs/toggle",
+      "default": 1
+    },
+    "imageRendering": {
+      "description": "0 = display, 1 = placeholder, 2 = suppress.",
+      "$ref": "#/$defs/enum3",
+      "default": 0
+    },
+    "readerMenuStyle": {
+      "description": "0 = list, 1 = toolbar. Touch boards only.",
+      "$ref": "#/$defs/enum2",
+      "default": 0
+    },
+    "dictionaryName": {
+      "description": "Selected dictionary folder under /dictionaries. Omitted when none is selected.",
+      "type": "string",
+      "maxLength": 31
+    },
+    "sideButtonLayout": {
+      "description": "0 = up is previous, 1 = up is next, 2 = disabled.",
+      "$ref": "#/$defs/enum3",
+      "default": 0
+    },
+    "touchReaderControls": {
+      "description": "0 = off, 1 = tap, 2 = swipe, 3 = inverted tap. Touch boards only.",
+      "$ref": "#/$defs/enum4",
+      "default": 2
+    },
+    "longPressWordLookup": {
+      "description": "Long-press a word in the reader to look it up; hides Look Up from the reader menu. Touch boards only.",
+      "$ref": "#/$defs/toggle",
+      "default": 1
+    },
+    "tapForReaderMenu": {
+      "description": "How the reader menu opens: 0 = off, 1 = center tap, 2 = bottom-edge swipe up. Home-key boards only.",
+      "$ref": "#/$defs/enum3",
+      "default": 1
+    },
+    "frontButtonFollowOrientation": {
+      "description": "Not written on touch boards.",
+      "$ref": "#/$defs/toggle",
+      "default": 0
+    },
+    "longPressButtonBehavior": {
+      "description": "Page-turn button long press: 0 = off, 1 = chapter skip, 2 = orientation change.",
+      "$ref": "#/$defs/enum3",
+      "default": 0
+    },
+    "longPressMenuFunction": {
+      "description": "Long-press Confirm in the reader: 0 = KOReader sync, 1 = disabled, 2 = bookmark, 3 = dictionary, 4 = reader menu (home-key boards only). On home-key boards, used once to migrate into homeButtonLongPressAction.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4,
+      "default": 1
+    },
+    "doubleClickPwrLight": {
+      "description": "Double-click power toggles the frontlight. X4 Pro only.",
+      "$ref": "#/$defs/toggle",
+      "default": 1
+    },
+    "shortPwrBtn": {
+      "description": "Short power press: 0 = ignore, 1 = sleep, 2 = page turn, 3 = force refresh, 4 = footnotes, 5 = confirm (touch boards only).",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 5,
+      "default": 0
+    },
+    "tiltPageTurn": {
+      "description": "0 = off, 1 = normal, 2 = inverted. Boards with the QMI8658 IMU only.",
+      "$ref": "#/$defs/enum3",
+      "default": 0
+    },
+    "pwrBtnFootnoteBack": {
+      "description": "Power button returns from footnotes.",
+      "$ref": "#/$defs/toggle",
+      "default": 1
+    },
+    "backShortToFileBrowser": {
+      "description": "Short Back goes to the file browser instead of home. Not written on touch boards.",
+      "$ref": "#/$defs/toggle",
+      "default": 0
+    },
+    "homeButtonTapAction": { "$ref": "#/$defs/homeButtonAction", "default": 0 },
+    "homeButtonDoubleTapAction": { "$ref": "#/$defs/homeButtonAction", "default": 10 },
+    "homeButtonLongPressAction": { "$ref": "#/$defs/homeButtonAction", "default": 9 },
+    "frontButtonBack": { "$ref": "#/$defs/frontButtonHardware", "default": 0 },
+    "frontButtonConfirm": { "$ref": "#/$defs/frontButtonHardware", "default": 1 },
+    "frontButtonLeft": { "$ref": "#/$defs/frontButtonHardware", "default": 2 },
+    "frontButtonRight": { "$ref": "#/$defs/frontButtonHardware", "default": 3 },
+    "sleepTimeoutMinutes": {
+      "description": "Minutes of inactivity before sleep; 31 = never.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 31,
+      "default": 10
+    },
+    "sleepTimeout": {
+      "description": "Legacy sleep timeout enum (0 = 1 min, 1 = 5, 2 = 10, 3 = 15, 4 = 30). Read only when sleepTimeoutMinutes is absent.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4,
+      "deprecated": true
+    },
+    "showHiddenFiles": {
+      "$ref": "#/$defs/toggle",
+      "default": 0
+    },
+    "libraryUseMetadata": {
+      "description": "Show title and author from book metadata instead of the filename.",
+      "$ref": "#/$defs/toggle",
+      "default": 1
+    },
+    "removeReadBooksFromRecents": {
+      "$ref": "#/$defs/toggle",
+      "default": 0
+    },
+    "moveFinishedToReadFolder": {
+      "description": "Move finished books to /Read/.",
+      "$ref": "#/$defs/toggle",
+      "default": 0
+    },
+    "opdsDownloadFolder": {
+      "description": "Destination folder for OPDS downloads; empty = SD root.",
+      "type": "string",
+      "maxLength": 63,
+      "default": ""
+    },
+    "opdsFilenameFormat": {
+      "description": "OPDS download file name: 0 = Author - Title, 1 = Title - Author, 2 = Title.",
+      "$ref": "#/$defs/enum3",
+      "default": 0
+    },
+    "frontlightBrightness": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "default": 60
+    },
+    "frontlightWarmth": {
+      "description": "0 = cool, 100 = warm. Warm-light boards only.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100,
+      "default": 50
+    },
+    "frontlightOn": {
+      "$ref": "#/$defs/toggle",
+      "default": 0
+    },
+    "statusBarChapterPageCount": {
+      "$ref": "#/$defs/toggle",
+      "default": 1
+    },
+    "statusBarBookProgressPercentage": {
+      "$ref": "#/$defs/toggle",
+      "default": 1
+    },
+    "statusBarProgressBar": {
+      "description": "0 = book, 1 = chapter, 2 = hidden.",
+      "$ref": "#/$defs/enum3",
+      "default": 2
+    },
+    "statusBarProgressBarThickness": {
+      "description": "0 = thin, 1 = medium, 2 = thick.",
+      "$ref": "#/$defs/enum3",
+      "default": 1
+    },
+    "statusBarTitle": {
+      "description": "0 = book title, 1 = chapter title, 2 = hidden.",
+      "$ref": "#/$defs/enum3",
+      "default": 1
+    },
+    "statusBarBattery": {
+      "$ref": "#/$defs/toggle",
+      "default": 1
+    },
+    "xtcStatusBarMode": {
+      "description": "Status bar in XTC books: 0 = hidden, 1 = bottom, 2 = top.",
+      "$ref": "#/$defs/enum3",
+      "default": 0
+    },
+    "statusBarClock": {
+      "description": "0 = hidden, 1 = right, 2 = left.",
+      "$ref": "#/$defs/enum3",
+      "default": 0
+    },
+    "clockUtcOffsetQ": {
+      "description": "Legacy UTC offset in quarter hours, biased by 48 (48 = UTC+0). Only used to migrate into clockTimezone while that is unset.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 104,
+      "default": 48
+    },
+    "clockFormat": {
+      "description": "0 = 24-hour, 1 = 12-hour.",
+      "$ref": "#/$defs/enum2",
+      "default": 0
+    },
+    "clockTimezone": {
+      "description": "Index into the append-only timezone table in src/util/Timezones.cpp; 255 = unset.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255,
+      "default": 255
+    },
+    "clockDst": {
+      "description": "0 = follow the timezone's DST rule, 1 = force on, 2 = force off.",
+      "$ref": "#/$defs/enum3",
+      "default": 0
+    },
+    "clockShowHeader": {
+      "description": "Show the clock in header bands opposite the battery.",
+      "$ref": "#/$defs/toggle",
+      "default": 0
+    },
+    "clockHasBeenSynced": {
+      "description": "Set after the first successful NTP sync; 0 forces a re-sync on the next WiFi connect.",
+      "$ref": "#/$defs/toggle",
+      "default": 0
+    },
+    "language": {
+      "description": "UI language code (the _language_code of a file in lib/I18n/translations/, e.g. \"EN\", \"DE\"). Unknown codes fall back to English.",
+      "type": "string",
+      "pattern": "^[A-Z0-9]+$",
+      "default": "EN"
+    },
+    "keyboardLayouts": {
+      "description": "Bitmask over keyboard_layouts::ALL. Omitted while unconfigured, which means the UI language's layout plus English.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    }
+  }
+}

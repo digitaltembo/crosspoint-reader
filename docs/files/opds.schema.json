@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "opds.json",
+  "description": "Configured OPDS catalog servers, written by OpdsServerStore (src/OpdsServerStore.cpp) to /.crosspoint/opds.json. A missing or non-array 'servers' key loads as an empty list.",
+  "type": "object",
+  "properties": {
+    "servers": {
+      "description": "Entries past MAX_SERVERS (8) are ignored on load.",
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "Display name.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Catalog root URL.",
+            "type": "string"
+          },
+          "username": {
+            "description": "HTTP auth username; empty when the catalog is public.",
+            "type": "string"
+          },
+          "password_obf": {
+            "description": "Password XORed with a key derived from the device MAC address, then base64-encoded. Only decodable on the device that wrote it.",
+            "type": "string",
+            "contentEncoding": "base64"
+          },
+          "password": {
+            "description": "Legacy plaintext password, read only when password_obf is absent or undecodable.",
+            "type": "string",
+            "deprecated": true
+          }
+        },
+        "required": ["name", "url", "username", "password_obf"]
+      }
+    }
+  },
+  "required": ["servers"]
+}
