@@ -3,9 +3,8 @@
 #include <FontCacheManager.h>
 #include <GfxRenderer.h>
 #include <Memory.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
 
+#include <algorithm>
 #include <cctype>
 #include <climits>
 #include <cstdlib>
@@ -13,12 +12,27 @@
 #include "CrossPointSettings.h"
 #include "DictionaryDefinitionActivity.h"
 #include "components/UITheme.h"
+#include "fontIds.h"
+#include "util/DictionaryRegistry.h"
 
 namespace {
 
 constexpr unsigned long POPUP_DURATION_MS = 1500;
 constexpr unsigned long WORD_REPEAT_START_MS = 500;
 constexpr unsigned long WORD_REPEAT_INTERVAL_MS = 500;
+
+// Highlight box grows the word by this much on each side.
+constexpr int HIGHLIGHT_PAD = 2;
+
+// "Look Up" bubble geometry.
+constexpr int BUBBLE_FONT_ID = UI_10_FONT_ID;
+constexpr int BUBBLE_PAD_X = 12;
+constexpr int BUBBLE_PAD_Y = 6;
+constexpr int BUBBLE_RADIUS = 6;
+constexpr int BUBBLE_GAP = 3;  // highlight edge to arrow tip
+constexpr int POINTER_HEIGHT = 7;
+constexpr int POINTER_HALF_WIDTH = 7;
+constexpr int BUBBLE_HIT_SLOP = 6;
 
 // A token is selectable when it has an ASCII alphanumeric or a non-ASCII
 // codepoint outside U+2000-U+206F (dashes, bullets and other General
@@ -36,8 +50,6 @@ bool isSelectableToken(const char* text) {
   }
   return false;
 }
-
-void indexBuildYield(void*) { vTaskDelay(1); }
 
 }  // namespace
 
@@ -169,77 +181,48 @@ void DictionaryWordSelectActivity::moveVertical(const int direction) {
 
 void DictionaryWordSelectActivity::performLookup() {
   popup = Popup::Busy;
-  if (!dictOpenAttempted) {
-    dictOpenAttempted = true;
-    dictOpenOk = dict.open(SETTINGS.dictionaryName);
-    // needsIndex() opens and validates the .qidx sidecar, so ask it once per
-    // open rather than once per word: the answer only changes when we build
-    // the sidecar ourselves, which is handled below.
-    dictNeedsIndex = dictOpenOk && dict.needsIndex();
-  }
-  popupMsg = dictNeedsIndex ? StrId::STR_DICT_INDEXING : StrId::STR_DICT_LOOKING_UP;
+  popupMsg = dictLookup.prepare(SETTINGS.dictionaryName) ? StrId::STR_DICT_INDEXING : StrId::STR_DICT_LOOKING_UP;
   requestUpdateAndWait();  // paint the page + busy popup before blocking on SD
 
-  bool ok = dictOpenOk;
-  Dictionary::IndexResult indexResult = Dictionary::IndexResult::Ok;
-  if (ok && dictNeedsIndex) {
-    ok = dict.buildIndex(&indexBuildYield, nullptr, &indexResult);
-    dictNeedsIndex = !ok;  // a successful build leaves the sidecar fresh; a failed one retries
-  }
-
+  const char* text = words[selected].text;
   std::string definition;
   std::string headword;
-  Dictionary::LookupResult result = Dictionary::LookupResult::NotFound;
-  const bool found = ok && dict.lookup(words[selected].text, definition, headword, &result);
+  // The default dictionary's failure is the one reported if no dictionary has
+  // the word.
+  StrId error = StrId::STR_DICT_NOT_FOUND;
+  std::string foundIn;
+  if (dictLookup.lookup(text, definition, headword, error)) {
+    foundIn = SETTINGS.dictionaryName;
+  } else {
+    // Miss in the default dictionary: try every other installed one before
+    // reporting it.
+    std::vector<DictionaryEntry> dictionaries;
+    DictionaryRegistry::discover(dictionaries);
+    for (const auto& entry : dictionaries) {
+      if (entry.name == SETTINGS.dictionaryName) continue;
+      if (dictLookup.prepare(entry.name.c_str()) && popupMsg != StrId::STR_DICT_INDEXING) {
+        popupMsg = StrId::STR_DICT_INDEXING;
+        requestUpdateAndWait();
+      }
+      StrId otherError = StrId::STR_DICT_NOT_FOUND;
+      if (dictLookup.lookup(text, definition, headword, otherError)) {
+        foundIn = entry.name;
+        break;
+      }
+    }
+  }
 
-  if (found) {
+  if (!foundIn.empty()) {
     popup = Popup::None;
-    startActivityForResult(
-        std::make_unique<DictionaryDefinitionActivity>(renderer, mappedInput, std::move(headword),
-                                                       std::move(definition), dict.definitionsAreHtml()),
-        [this](const ActivityResult&) { requestUpdate(); });
+    // Back from the definition returns straight to the reader.
+    startActivityForResult(std::make_unique<DictionaryDefinitionActivity>(
+                               renderer, mappedInput, dictLookup, text, foundIn.c_str(), std::move(headword),
+                               std::move(definition), dictLookup.definitionsAreHtml()),
+                           [](const ActivityResult&) { finish(); });
     return;
   }
-  // Name the failure: a genuine miss is "Not found"; a word that WAS found but
-  // couldn't be read is a real error — and we distinguish decompression from a
-  // low-memory allocation from a generic read error.
-  if (!ok) {
-    popup = Popup::Error;
-    // An index build allocates a scan buffer, so it fails the same way lookups
-    // do on a fragmented heap — name that rather than a generic error.
-    switch (indexResult) {
-      case Dictionary::IndexResult::LowMemory:
-        popupMsg = StrId::STR_DICT_LOW_MEMORY;
-        break;
-      case Dictionary::IndexResult::ReadError:
-        popupMsg = StrId::STR_DICT_READ_FAILED;
-        break;
-      case Dictionary::IndexResult::Ok:
-      default:
-        popupMsg = StrId::STR_DICT_ERROR;  // dict.open() failed, not the index
-        break;
-    }
-  } else {
-    switch (result) {
-      case Dictionary::LookupResult::Decompress:
-        popup = Popup::Error;
-        popupMsg = StrId::STR_DICT_DECOMPRESS_ERROR;
-        break;
-      case Dictionary::LookupResult::LowMemory:
-        popup = Popup::Error;
-        popupMsg = StrId::STR_DICT_LOW_MEMORY;
-        break;
-      case Dictionary::LookupResult::ReadError:
-        popup = Popup::Error;
-        popupMsg = StrId::STR_DICT_READ_FAILED;
-        break;
-      case Dictionary::LookupResult::NotFound:
-      default:
-        popup = Popup::NotFound;
-        popupMsg = StrId::STR_DICT_NOT_FOUND;
-        break;
-    }
-  }
+  popup = error == StrId::STR_DICT_NOT_FOUND ? Popup::NotFound : Popup::Error;
+  popupMsg = error;
   popupTime = millis();
   requestUpdate();
 }
@@ -265,7 +248,8 @@ void DictionaryWordSelectActivity::loop() {
   if (words.empty()) return;
 
   // Touch: the first tap (or long-press) on a word highlights it, a tap on the
-  // highlight looks it up, and a tap away from the text leaves lookup mode.
+  // highlight or its bubble looks it up, and a tap away from the text leaves
+  // lookup mode.
   int tx = 0;
   int ty = 0;
   if (mappedInput.wasScreenLongPress(tx, ty)) {
@@ -277,6 +261,11 @@ void DictionaryWordSelectActivity::loop() {
     return;
   }
   if (mappedInput.wasScreenTapped(tx, ty)) {
+    // The bubble overlaps the neighbouring line, so it takes the tap first.
+    if (bubbleHit(tx, ty)) {
+      performLookup();
+      return;
+    }
     const int hit = wordAt(tx, ty);
     if (hit < 0) {
       finish();
@@ -312,16 +301,26 @@ void DictionaryWordSelectActivity::loop() {
   }
 }
 
-// Saves the pixels under words[selected]'s highlight box, then draws the
-// highlight over them. Returns false when the pixels could not be saved
-// (no buffer / oversize box) — the highlight is drawn regardless, but the
-// next cursor move must do a full repaint.
+// Saves the pixels under words[selected]'s highlight box (and bubble), then
+// draws them. Returns false when the pixels could not be saved (no buffer /
+// oversize box) — everything is drawn regardless, but the next cursor move
+// must do a full repaint.
 bool DictionaryWordSelectActivity::drawHighlightWithSnapshot() {
+  const auto region = [](const int x, const int y, const int w, const int h, const size_t offset) {
+    SavedRegion r;
+    r.x = static_cast<int16_t>(x);
+    r.y = static_cast<int16_t>(y);
+    r.w = static_cast<int16_t>(w);
+    r.h = static_cast<int16_t>(h);
+    r.offset = static_cast<uint16_t>(offset);
+    return r;
+  };
+
   const WordBox& word = words[selected];
-  int hx = word.x - 2;
-  int hy = word.y - 2;
-  int hw = word.width + 4;
-  int hh = lineHeight + 4;
+  int hx = word.x - HIGHLIGHT_PAD;
+  int hy = word.y - HIGHLIGHT_PAD;
+  int hw = word.width + 2 * HIGHLIGHT_PAD;
+  int hh = lineHeight + 2 * HIGHLIGHT_PAD;
   // Clamp to the panel so save, draw and restore all use the same box.
   if (hx < 0) {
     hw += hx;
@@ -332,19 +331,80 @@ bool DictionaryWordSelectActivity::drawHighlightWithSnapshot() {
     hy = 0;
   }
 
-  bool saved = false;
+  size_t used = 0;
   if (snapshot && hw > 0 && hh > 0) {
-    saved = renderer.readFramebufferRegion(hx, hy, hw, hh, snapshot.get(), SNAPSHOT_CAPACITY) > 0;
+    used = renderer.readFramebufferRegion(hx, hy, hw, hh, snapshot.get(), SNAPSHOT_CAPACITY);
   }
-  snapshotX = static_cast<int16_t>(hx);
-  snapshotY = static_cast<int16_t>(hy);
-  snapshotW = static_cast<int16_t>(hw);
-  snapshotH = static_cast<int16_t>(hh);
-  snapshotIdx = saved ? selected : -1;
+  bool saved = used > 0;
+  highlightRegion = region(hx, hy, hw, hh, 0);
 
   renderer.fillRect(hx, hy, hw, hh, true);
   renderer.drawText(fontId, word.x, word.y, word.text, false, word.style);
+
+  bubbleSaved = false;
+  if (showBubble) {
+    const Bubble bubble = lookupBubble();
+    const int by = bubble.below ? bubble.y - POINTER_HEIGHT : bubble.y;
+    const int bh = bubble.height + POINTER_HEIGHT;
+    // Saved after the highlight is drawn: the two byte-aligned regions can
+    // overlap, and restoring in reverse order unwinds them correctly.
+    if (saved) {
+      bubbleSaved = renderer.readFramebufferRegion(bubble.x, by, bubble.width, bh, snapshot.get() + used,
+                                                   SNAPSHOT_CAPACITY - used) > 0;
+      saved = bubbleSaved;
+    }
+    bubbleRegion = region(bubble.x, by, bubble.width, bh, used);
+    drawBubble(bubble);
+  }
+
+  snapshotIdx = saved ? selected : -1;
   return saved;
+}
+
+DictionaryWordSelectActivity::Bubble DictionaryWordSelectActivity::lookupBubble() const {
+  const WordBox& word = words[selected];
+  int top = 0;
+  int right = 0;
+  int bottom = 0;
+  int left = 0;
+  renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+
+  Bubble bubble;
+  bubble.width = renderer.getTextWidth(BUBBLE_FONT_ID, tr(STR_LOOKUP)) + 2 * BUBBLE_PAD_X;
+  bubble.height = renderer.getLineHeight(BUBBLE_FONT_ID) + 2 * BUBBLE_PAD_Y;
+
+  const int centerX = word.x + word.width / 2;
+  const int maxX = renderer.getScreenWidth() - right - bubble.width;
+  bubble.x = std::max(left, std::min(centerX - bubble.width / 2, maxX));
+
+  const int aboveY = word.y - HIGHLIGHT_PAD - BUBBLE_GAP - POINTER_HEIGHT - bubble.height;
+  bubble.below = aboveY < top;
+  bubble.y = bubble.below ? word.y + lineHeight + HIGHLIGHT_PAD + BUBBLE_GAP + POINTER_HEIGHT : aboveY;
+
+  // Keep the arrow on the bubble's straight edge when the bubble is pushed
+  // sideways by the screen edge.
+  const int inset = BUBBLE_RADIUS + POINTER_HALF_WIDTH;
+  bubble.pointerX = std::max(bubble.x + inset, std::min(centerX, bubble.x + bubble.width - inset));
+  return bubble;
+}
+
+bool DictionaryWordSelectActivity::bubbleHit(const int x, const int y) const {
+  if (!showBubble || words.empty()) return false;
+  const Bubble bubble = lookupBubble();
+  return x >= bubble.x - BUBBLE_HIT_SLOP && x < bubble.x + bubble.width + BUBBLE_HIT_SLOP &&
+         y >= bubble.y - BUBBLE_HIT_SLOP && y < bubble.y + bubble.height + BUBBLE_HIT_SLOP;
+}
+
+void DictionaryWordSelectActivity::drawBubble(const Bubble& bubble) const {
+  renderer.fillRoundedRect(bubble.x, bubble.y, bubble.width, bubble.height, BUBBLE_RADIUS, Color::Black);
+
+  const int baseY = bubble.below ? bubble.y : bubble.y + bubble.height - 1;
+  const int tipY = bubble.below ? bubble.y - POINTER_HEIGHT : bubble.y + bubble.height - 1 + POINTER_HEIGHT;
+  const int xs[3] = {bubble.pointerX - POINTER_HALF_WIDTH, bubble.pointerX + POINTER_HALF_WIDTH, bubble.pointerX};
+  const int ys[3] = {baseY, baseY, tipY};
+  renderer.fillPolygon(xs, ys, 3, true);
+
+  renderer.drawText(BUBBLE_FONT_ID, bubble.x + BUBBLE_PAD_X, bubble.y + BUBBLE_PAD_Y, tr(STR_LOOKUP), false);
 }
 
 // Front-button bar (Back/Confirm/Left/Right). Drawn last on every repaint
@@ -372,7 +432,12 @@ void DictionaryWordSelectActivity::render(RenderLock&&) {
   // repaint). Restore the pixels under the old highlight, draw the new one,
   // and push — skipping the two-pass page render entirely.
   if (popup == Popup::None && snapshotIdx >= 0 && !words.empty() && selected != snapshotIdx) {
-    renderer.writeFramebufferRegion(snapshotX, snapshotY, snapshotW, snapshotH, snapshot.get());
+    if (bubbleSaved) {
+      renderer.writeFramebufferRegion(bubbleRegion.x, bubbleRegion.y, bubbleRegion.w, bubbleRegion.h,
+                                      snapshot.get() + bubbleRegion.offset);
+    }
+    renderer.writeFramebufferRegion(highlightRegion.x, highlightRegion.y, highlightRegion.w, highlightRegion.h,
+                                    snapshot.get());
     // The full path's PrewarmScope cleared the glyph cache on exit; batch-load
     // just the highlighted word's glyphs before drawing them white-on-black.
     renderer.getFontCacheManager()->prewarmCache(

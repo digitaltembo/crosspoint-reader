@@ -39,7 +39,7 @@ One word on the page becomes highlighted:
 2. Press **Confirm** to look up the highlighted word.
 3. Press **Back** to return to the reader.
 
-On touch devices (X4 Pro and other touchscreen readers), long-press a word on the reading page to enter lookup mode with that word highlighted. Tap the highlight to show its definition, tap another word to move the highlight there, or tap away from the text to return to the reader. While **Settings → Controls → Long-Press Word to Look Up** is on (the default), this replaces **Look Up** in the reader menu; turn it off to get the menu entry back and keep long-presses for page-turn behavior.
+On touch devices (X4 Pro and other touchscreen readers), long-press a word on the reading page to enter lookup mode with that word highlighted and a **Look Up** bubble above it. Tap the bubble or the highlight to show its definition, tap another word to move the highlight there, or tap away from the text to return to the reader. While **Settings → Controls → Long-Press Word to Look Up** is on (the default), this replaces **Look Up** in the reader menu; turn it off to get the menu entry back and keep long-presses for page-turn behavior.
 
 On the very first lookup with a dictionary (and again whenever the `.idx` or `.syn` source file changes), the reader shows *"Indexing dictionary…"* while it builds small sidecar files next to them — a `.qidx` for the word index, and a `.sidx` when a `.syn` synonym file is present. Each sidecar is rebuilt independently, only when its own source changes. This takes a few seconds for large dictionaries and makes all subsequent lookups fast. The sidecars can be deleted safely at any time — they will simply be rebuilt.
 
@@ -48,7 +48,8 @@ On the very first lookup with a dictionary (and again whenever the `.idx` or `.s
 1. **Direct match** — the word is found as-is (case-insensitive) in the dictionary index. Surrounding punctuation is ignored.
 2. **Synonyms** — on a miss, if the dictionary ships a `.syn` file, alternate spellings and irregular forms recorded there are resolved to their headword (e.g. `oxen` → `ox`, `colour` → `color`). This step is skipped if the `.sidx` sidecar could not be built (e.g. transient low memory during indexing); the dictionary otherwise stays usable, and the build is retried the next time it is opened.
 3. **Stemming** — still no match: common English word forms are retried automatically: possessives and plurals (`dogs` → `dog`, `stories` → `story`) and verb endings (`walked` → `walk`, `running` → `run`, `making` → `make`).
-4. **Not found** — a short popup appears and you return to word selection.
+4. **Other dictionaries** — if the selected dictionary still has no match, every other installed dictionary is tried in turn (steps 1–3 each), and the first one with the word is shown.
+5. **Not found** — no installed dictionary has the word: a short popup appears and you return to word selection.
 
 ## The Definition Screen
 
@@ -56,8 +57,12 @@ When a word is found, the definition screen shows the matched headword at the to
 
 HTML dictionaries that declare `sametypesequence=h` use the EPUB text-layout engine for semantic formatting such as headings, bold, italics, lists, and line breaks. Images and CSS styling are ignored. Definitions that are too large or cannot be laid out within the available memory fall back to plain text.
 
+When more than one dictionary is installed, a row of tabs under the headword lists them, with the dictionary the definition came from selected (your default, unless it lacked the word). Choosing another tab looks the same word up in that dictionary (showing *"Not found"* if it isn't there); your default dictionary setting is unchanged. Tabs are labelled with the dictionary folder names, so short folder names read best.
+
 - **Left/Right** or side **Up/Down** — previous / next page
-- **Back** — return to word selection
+- **Confirm** — switch to the next dictionary tab
+- **Back** (or the header's back arrow on touch devices) — return to the book
+- Touch: tap a tab to switch dictionaries; tap the left third of the screen for the previous page, elsewhere for the next
 
 
 
