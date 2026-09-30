@@ -294,8 +294,9 @@ void ActivityManager::goToBrowser() {
   }
 }
 
-void ActivityManager::goToPlugins(bool showOpds) {
-  replaceActivity(std::make_unique<PluginCatalogActivity>(renderer, mappedInput, showOpds, /*rootMode=*/true));
+void ActivityManager::goToPlugins() {
+  replaceActivity(
+      std::make_unique<PluginCatalogActivity>(renderer, mappedInput, /*showOpds=*/false, /*rootMode=*/true));
 }
 
 void ActivityManager::goToReader(std::string path, const bool allowFastInitialRefresh) {
@@ -338,9 +339,9 @@ void ActivityManager::goHome(HomeMenuItem initialMenuItem, bool cleanInitialRefr
       initialMenuItem = HomeMenuItem::FILE_BROWSER;
     } else if (activityName == "Library") {
       initialMenuItem = HomeMenuItem::LIBRARY;
-    } else if (activityName == "OpdsBookBrowser") {
-      initialMenuItem = HomeMenuItem::OPDS_BROWSER;
-    } else if (activityName == "CrossPointWebServer") {
+    } else if (activityName == "PluginCatalog") {
+      initialMenuItem = HomeMenuItem::PLUGINS;
+    } else if (activityName == "CrossPointWebServer" || activityName == "OpdsBookBrowser") {
       initialMenuItem = HomeMenuItem::FILE_TRANSFER;
     } else if (activityName == "Settings") {
       initialMenuItem = HomeMenuItem::SETTINGS_MENU;
