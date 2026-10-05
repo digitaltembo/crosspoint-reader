@@ -14,8 +14,8 @@ namespace fui = freeink::ui;
 namespace {
 // Row icons, indexed by SettingsSection; 32px since every row has a subtitle.
 constexpr const freeink::Icon* SECTION_ICONS[SETTINGS_SECTION_COUNT] = {
-    &icon_settings_32, &icon_monitor_32, &icon_book_open_32, &icon_pointer_32,
-    &icon_library_32,  &icon_wifi_32,    &icon_cpu_32,
+    &icon_settings_32, &icon_sun_moon_32, &icon_book_open_32, &icon_pointer_32,
+    &icon_library_32,  &icon_wifi_32,     &icon_cpu_32,
 };
 }  // namespace
 
